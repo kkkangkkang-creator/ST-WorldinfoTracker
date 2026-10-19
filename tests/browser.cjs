@@ -100,7 +100,7 @@ window.chats = chats; window.store = store;
     await page.waitForSelector('.wit-dialog');
     await page.fill('.wit-replace input >> nth=0', 'two weeks');
     await page.fill('.wit-replace input >> nth=1', '9 days');
-    await page.click('.wit-dialog button >> text=모두 바꾸기');
+    await page.click('.wit-dialog button >> text=바꾸기');
     assert.match(await page.textContent('.wit-dialog'), /2곳 바꿨어요/);
     if (shots) await page.screenshot({ path: path.join(shots, '2-editor.png') });
     await page.click('.wit-dialog button >> text=이 방에만 저장');
@@ -126,7 +126,7 @@ window.chats = chats; window.store = store;
     await page.click('.wit-tabs button >> text=이번 응답');
     await page.click('.wit-row >> text=헌터물 기본 설정 보강');
     await page.waitForSelector('.wit-dialog');
-    assert.match(await page.textContent('.wit-where'), /이 방 전용 책 · 원본: AU/);
+    assert.match(await page.textContent('.wit-where'), /현재: 📗 이 방 전용 · 원본 AU/);
 
     // 5. Revert the copy.
     await page.click('.wit-dialog button >> text=원본으로 되돌리기');
@@ -140,10 +140,26 @@ window.chats = chats; window.store = store;
     await page.fill('.wit-dialog .wit-field >> nth=0 >> input', '균열');
     await page.fill('.wit-dialog .wit-field >> nth=1 >> textarea', '균열, rift');
     await page.fill('.wit-dialog textarea.wit-content', '## Rifts (not yet occurred)');
+    await page.click('.wit-modes button[data-mode=constant]');
+    await page.fill('.wit-settings-row input >> nth=0', '50');
+    await page.fill('.wit-settings-row input >> nth=1', '70');
     await page.click('.wit-dialog button >> text=이 방에 추가');
     await page.waitForSelector('.wit-dialog', { state: 'detached' });
     state = await page.evaluate(() => window.books);
-    assert.deepEqual(Object.values(state[book].entries).map(e => [e.comment, e.key, e.content]), [['균열', ['균열', 'rift'], '## Rifts (not yet occurred)']]);
+    assert.deepEqual(Object.values(state[book].entries).map(e => [e.comment, e.key, e.content, e.constant, e.vectorized, e.order, e.probability, e.useProbability]),
+        [['균열', ['균열', 'rift'], '## Rifts (not yet occurred)', true, false, 50, 70, true]]);
+
+    // Phone width: a long entry still shows the save buttons without scrolling the dialog.
+    await page.setViewportSize({ width: 390, height: 760 });
+    await page.click('.wit-tabs button >> text=전체 엔트리');
+    await page.click('.wit-row >> text=헌터물 기본 설정 보강');
+    await page.waitForSelector('.wit-dialog');
+    await page.fill('.wit-dialog textarea.wit-content', 'line\n'.repeat(200));
+    const footer = await page.$eval('.wit-modal-footer', f => { const r = f.getBoundingClientRect(); return { bottom: r.bottom, h: innerHeight }; });
+    assert.ok(footer.bottom <= footer.h, JSON.stringify(footer));
+    if (shots) await page.screenshot({ path: path.join(shots, '5-phone-editor.png') });
+    await page.click('.wit-dialog button >> text=닫기');
+    await page.setViewportSize({ width: 1100, height: 800 });
 
     // 7. Another chat is unaffected; saving to the shared book there keeps a backup.
     await page.evaluate(async () => { window.currentChat = 'B'; await window.eventSource.emit('CHAT_CHANGED'); });

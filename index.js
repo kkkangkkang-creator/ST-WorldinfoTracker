@@ -217,8 +217,8 @@ async function confirmAction(title, message) {
     return popup ? Boolean(await popup(title, message)) : globalThis.confirm(`${title}\n${message}`);
 }
 function field(label, input) {
-    const wrap = el('label', 'wit-field', label);
-    wrap.append(input);
+    const wrap = el('label', 'wit-field');
+    wrap.append(el('span', '', label), input);
     return wrap;
 }
 function entryTitle(entry) {
@@ -246,34 +246,65 @@ async function openEditor(item) {
     const rep = item ? replacementOf(item.world, item.uid) : null;
     const d = modal(item ? '엔트리 수정' : '새 엔트리 · 이 방 전용');
 
+    const main = el('div', 'wit-dialog-body');
     const where = el('p', 'wit-where');
-    if (!item) where.textContent = `📗 이 방 전용 책에 추가돼요${book ? ` (${book})` : ' · 처음 저장할 때 책을 만들어요'}`;
-    else if (inChatBook) where.textContent = `📗 이 방 전용 책${rep ? ` · 원본: ${rep.world}` : ''}`;
-    else where.textContent = `📘 ${item.world} · 공용 책이에요. "이 방에만 저장"하면 다른 채팅은 그대로예요.`;
-    d.append(where);
+    if (!item) where.textContent = `현재: 📗 이 방 전용${book ? ` · ${book}` : ' · 저장할 때 책을 만들어요'}`;
+    else if (inChatBook) where.textContent = `현재: 📗 이 방 전용${rep ? ` · 원본 ${rep.world}` : ` · ${item.world}`}`;
+    else where.textContent = `현재: 📘 ${item.world} · 공용`;
+    main.append(where);
 
-    const title = el('input'); title.value = raw?.comment ?? ''; title.placeholder = '예: 균열';
-    const keys = el('textarea'); keys.rows = 2; keys.value = formatKeys(raw?.key); keys.placeholder = '쉼표로 구분 · 예: 균열, rift';
-    const keys2 = el('textarea'); keys2.rows = 1; keys2.value = formatKeys(raw?.keysecondary); keys2.placeholder = '비워도 돼요';
-    const constant = el('input'); constant.type = 'checkbox'; constant.checked = Boolean(raw?.constant);
-    const constantRow = el('label', 'wit-check'); constantRow.append(constant, el('span', '', '🔵 상시 (키워드 없이 항상 넣기)'));
-    const content = el('textarea', 'wit-content'); content.rows = 14; content.value = raw?.content ?? '';
-    d.append(field('제목', title), field('키워드', keys), field('보조 키워드', keys2), constantRow, field('본문', content));
+    const title = el('input'); title.value = raw?.comment ?? '';
+    const keys = el('textarea'); keys.rows = 1; keys.value = formatKeys(raw?.key); keys.placeholder = '쉼표로 구분';
+    const keys2 = el('textarea'); keys2.rows = 1; keys2.value = formatKeys(raw?.keysecondary);
+    main.append(field('제목', title), field('키워드', keys), field('보조', keys2));
+
+    // Activation mode, order and probability on one row.
+    let mode = raw?.constant ? 'constant' : raw?.vectorized ? 'vectorized' : 'keyword';
+    const modes = el('span', 'wit-modes');
+    for (const kind of ['constant', 'keyword', 'vectorized']) {
+        const b = button(modeIcons[kind], () => { mode = kind; for (const x of modes.children) x.classList.toggle('is-active', x.dataset.mode === mode); }, '', modeLabels[kind]);
+        b.dataset.mode = kind; b.classList.toggle('is-active', kind === mode);
+        modes.append(b);
+    }
+    const order = el('input'); order.type = 'number'; order.inputMode = 'numeric'; order.value = String(raw?.order ?? 100);
+    const probability = el('input'); probability.type = 'number'; probability.inputMode = 'numeric'; probability.min = '0'; probability.max = '100';
+    probability.value = String(raw?.probability ?? 100);
+    const settingsRow = el('div', 'wit-settings-row');
+    const orderLabel = el('label', '', '순서'); orderLabel.append(order);
+    const probLabel = el('label', '', '확률'); probLabel.append(probability, el('span', 'wit-muted', '%'));
+    settingsRow.append(modes, orderLabel, probLabel);
+    main.append(settingsRow);
+
+    const content = el('textarea', 'wit-content'); content.rows = 10; content.value = raw?.content ?? ''; content.setAttribute('aria-label', '본문');
+    main.append(content);
 
     // Find & replace inside the body, e.g. "two weeks" -> "9 days".
     const findBox = el('div', 'wit-replace');
     const find = el('input'); find.placeholder = '찾을 말';
     const repl = el('input'); repl.placeholder = '바꿀 말';
     const replNote = el('small', 'wit-muted');
-    findBox.append(find, repl, button('모두 바꾸기', () => {
+    findBox.append(find, repl, button('바꾸기', () => {
         const n = countOccurrences(content.value, find.value);
         if (!n) { replNote.textContent = '찾지 못했어요.'; return; }
         content.value = content.value.split(find.value).join(repl.value);
         replNote.textContent = `${n}곳 바꿨어요 (아직 저장 전)`;
-    }, 'wit-quiet'));
-    d.append(el('p', 'wit-label', '본문에서 찾아 바꾸기'), findBox, replNote);
+    }, 'wit-quiet', '모두 바꾸기'));
+    main.append(findBox, replNote);
+    d.append(main);
 
-    const edits = () => ({ comment: title.value.trim(), key: parseKeys(keys.value), keysecondary: parseKeys(keys2.value), content: content.value, constant: constant.checked });
+    const number = (input, fallback, min, max) => {
+        const n = Math.round(Number(input.value));
+        return Number.isFinite(n) && input.value !== '' ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const edits = () => {
+        const chance = number(probability, raw?.probability ?? 100, 0, 100);
+        return {
+            comment: title.value.trim(), key: parseKeys(keys.value), keysecondary: parseKeys(keys2.value), content: content.value,
+            constant: mode === 'constant', vectorized: mode === 'vectorized',
+            order: number(order, raw?.order ?? 100, -999999, 999999), probability: chance,
+            useProbability: chance < 100 ? true : (raw?.useProbability ?? true),
+        };
+    };
     const finish = ok => { if (ok) { closeDialog(); scheduleRefresh(); } };
     const footer = el('div', 'wit-modal-footer');
     if (!item) {
@@ -301,7 +332,7 @@ async function openEditor(item) {
         const backup = await readBackup(item.world, item.uid);
         if (backup && dialog === d) footer.append(button('저장 전 내용 불러오기', () => {
             title.value = backup.comment; keys.value = formatKeys(backup.key); keys2.value = formatKeys(backup.keysecondary);
-            content.value = backup.content; constant.checked = Boolean(backup.constant);
+            content.value = backup.content;
             notify('마지막 저장 직전 내용을 불러왔어요. 저장해야 반영돼요.');
         }, 'wit-quiet'));
     }

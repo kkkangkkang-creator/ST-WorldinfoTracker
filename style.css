@@ -19,9 +19,9 @@
 .wit-panel .wit-primary,.wit-dialog .wit-primary { background:var(--wit-accent); color:#ffffff; font-weight:700; }
 .wit-panel .wit-quiet,.wit-dialog .wit-quiet { background:transparent; border-color:var(--wit-line); color:var(--wit-muted); }
 .wit-muted { color:var(--wit-muted); }
-.wit-panel input.wit-search,.wit-dialog input:not([type=checkbox]),.wit-dialog textarea { flex:1; width:100%; min-width:0; background:#ffffff; color:var(--wit-text); border:1px solid var(--wit-line); border-radius:9px; padding:7px 9px; font-size:13px; font-family:inherit; box-shadow:none; }
-.wit-dialog textarea { resize:vertical; display:block; margin-top:6px; }
-.wit-dialog textarea.wit-content { min-height:220px; line-height:1.5; }
+.wit-panel input.wit-search,dialog.wit-dialog input:not([type=checkbox]),dialog.wit-dialog textarea { flex:1; width:100%; min-width:0; margin:0; background:#ffffff!important; color:var(--wit-text)!important; border:1px solid var(--wit-line)!important; border-radius:8px; padding:6px 9px; font-size:13px; font-family:inherit; box-shadow:none; }
+dialog.wit-dialog textarea { resize:vertical; display:block; min-height:0; line-height:1.4; }
+dialog.wit-dialog textarea.wit-content { flex:1 1 auto; min-height:160px; line-height:1.5; }
 .wit-body { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; padding-right:2px; }
 .wit-note { margin:0 0 6px; font-size:11px; color:var(--wit-muted); }
 .wit-section { display:flex; flex-direction:column; margin-bottom:10px; }
@@ -41,20 +41,27 @@
 .wit-badge { position:absolute; top:-2px; right:-2px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#4f6584; color:#ffffff; font-size:11px; line-height:18px; font-weight:700; text-align:center; pointer-events:none; }
 .wit-badge[hidden] { display:none; }
 #wit-floating-launcher::backdrop { background:transparent; pointer-events:none; }
-.wit-dialog { width:560px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 32px); border:1px solid var(--wit-line); border-radius:12px; padding:14px; margin:auto; overflow:auto; box-shadow:0 12px 40px #24302622; }
+.wit-dialog { width:560px; max-width:calc(100vw - 24px); height:calc(100dvh - 32px); max-height:820px; border:1px solid var(--wit-line); border-radius:12px; padding:12px; margin:auto; overflow:hidden; box-shadow:0 12px 40px #24302622; }
+/* Header and footer stay put; only the middle scrolls, so the save buttons are always visible. */
+.wit-dialog[open] { display:flex; flex-direction:column; gap:8px; }
 .wit-dialog::backdrop { background:#26302644; }
+.wit-modal-head { flex:none; align-items:center; }
 .wit-modal-head h3 { margin:0; font-size:16px; color:var(--wit-text); }
-.wit-where { font-size:12px; margin:8px 0; padding:8px 10px; background:var(--wit-card); border-radius:8px; overflow-wrap:anywhere; }
-.wit-field { display:block; margin:10px 0; font-size:12px; color:var(--wit-muted); }
-.wit-field input { display:block; margin-top:6px; }
-.wit-check { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px; cursor:pointer; }
-.wit-check input { width:18px; height:18px; margin:0; accent-color:var(--wit-accent); }
-.wit-label { margin:12px 0 4px; font-size:12px; color:var(--wit-muted); }
-.wit-replace { display:flex; gap:6px; }
-.wit-modal-footer { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.wit-dialog-body { flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; display:flex; flex-direction:column; gap:6px; padding:2px; }
+.wit-where { flex:none; font-size:12px; margin:0; padding:6px 9px; background:var(--wit-card); border-radius:8px; overflow-wrap:anywhere; }
+.wit-field { display:flex; align-items:center; gap:8px; margin:0; font-size:12px; color:var(--wit-muted); }
+.wit-field > span { flex:0 0 44px; }
+.wit-settings-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; font-size:12px; color:var(--wit-muted); }
+.wit-settings-row label { display:flex; align-items:center; gap:5px; }
+dialog.wit-dialog .wit-settings-row input { width:68px; flex:none; text-align:right; }
+.wit-modes { display:flex; gap:2px; padding:2px; background:#ffffff; border:1px solid var(--wit-line); border-radius:8px; }
+.wit-dialog .wit-modes button { min-height:28px; padding:2px 8px; background:transparent; filter:grayscale(1) opacity(.45); }
+.wit-dialog .wit-modes button.is-active { background:#e4eaf2; filter:none; }
+.wit-replace { display:flex; gap:6px; flex:none; }
+.wit-replace + small:empty { display:none; }
+.wit-modal-footer { flex:none; display:flex; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--wit-line); }
 .wit-size { display:flex; align-items:center; gap:8px; margin:6px 0; }
 @media(max-width:520px) {
     .wit-panel,.wit-panel[popover] { inset:auto 8px 79px auto; right:8px; bottom:79px; width:calc(100vw - 16px); max-width:none; height:min(560px,calc(100dvh - 100px)); border-radius:14px; }
-    .wit-dialog { padding:12px; }
-    .wit-replace { flex-wrap:wrap; }
+    .wit-dialog { padding:10px; max-width:calc(100vw - 12px); height:calc(100dvh - 16px); }
 }
