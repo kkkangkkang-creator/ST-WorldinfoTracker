@@ -5,7 +5,7 @@ import {
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
     pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits,
     parseAiResult, validVarName, findVarRefs, isReadable, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines,
-    parseTagList, thinTagBlocks, splitParts, pickTrackDetails, buildTrackMessages, AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT, DEFAULT_EXTRA_PROMPT,
+    parseTagList, thinTagBlocks, splitParts, pickTrackDetails, buildTrackMessages, AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT, DEFAULT_EXTRA_PROMPT, FORMAT_LOCKED, DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES, buildSystemPrompt,
 } from '../core.mjs';
 
 const globals = { depth: 2, caseSensitive: false, matchWholeWords: false };
@@ -298,4 +298,18 @@ test('tracker messages and prompts', () => {
     for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) assert.match(prompt, /\{\{getvar::name\}\}/);
     assert.ok(!/Naming and concepts/.test(AI_SYSTEM_PROMPT + TRACK_SYSTEM_PROMPT), 'the naming rule lives in the user instructions, not the built-in prompt');
     assert.match(DEFAULT_EXTRA_PROMPT, /^## Concrete Concepts & Naming\n\n- Prefer concrete/);
+});
+
+test('rules are editable, the reply format is always appended and locked', () => {
+    const [ask] = buildAiMessages({ request: 'x', entries: [], details: [], rules: 'MY ASK RULES', extra: '한국어로' });
+    assert.ok(ask.content.startsWith('MY ASK RULES\n\nReply with JSON only'));
+    assert.ok(ask.content.includes(FORMAT_LOCKED));
+    assert.ok(ask.content.endsWith('\n한국어로'), 'extra instructions come last');
+    const [track] = buildTrackMessages({ lines: [], entries: [], details: [], rules: '' });
+    assert.equal(track.content, FORMAT_LOCKED, 'even empty rules keep the format');
+    assert.equal(buildAiMessages({ request: 'x', entries: [], details: [] })[0].content, AI_SYSTEM_PROMPT);
+    assert.equal(buildTrackMessages({ lines: [], entries: [], details: [] })[0].content, TRACK_SYSTEM_PROMPT);
+    assert.equal(AI_SYSTEM_PROMPT, buildSystemPrompt(DEFAULT_ASK_RULES));
+    // the format block is the only place that spells out the JSON shape
+    for (const rules of [DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES]) assert.ok(!rules.includes('Reply with JSON'));
 });

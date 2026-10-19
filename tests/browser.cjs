@@ -266,6 +266,16 @@ window.chats = chats; window.store = store;
     assert.deepEqual(await page.$$eval('.wit-setup select.wit-profile option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
     await page.selectOption('.wit-setup select.wit-profile', 'p1');
     assert.match(await page.inputValue('.wit-setup-prompt'), /^## Concrete Concepts & Naming/, 'the naming rule is pre-filled once');
+    // editable AI rules: the format stays locked, a custom text replaces the rules only
+    await page.click('.wit-advanced > summary');
+    assert.match(await page.inputValue('.wit-rules-text >> nth=0'), /^You maintain the World Info/);
+    assert.match(await page.textContent('.wit-rules >> nth=0'), /약 [\d,]+자 · 기본값/);
+    await page.fill('.wit-rules-text >> nth=0', 'MY ASK RULES');
+    await page.fill('.wit-rules-text >> nth=1', 'MY TRACK RULES');
+    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.askPrompt, s.trackPrompt]; }), ['MY ASK RULES', 'MY TRACK RULES']);
+    assert.match(await page.textContent('.wit-rules >> nth=0'), /내가 고침/);
+    await page.click('.wit-locked > summary');
+    assert.match(await page.textContent('.wit-locked pre'), /Reply with JSON only/);
     await page.fill('.wit-setup-prompt', '한국어로 써줘');
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.autoOn, s.autoEvery, s.trackTags]; }), [false, 30, 'Status'], 'auto tracking is off by default, every 30 turns');
     const numbers = await page.$$('.wit-setup input[type=number]');
@@ -280,7 +290,7 @@ window.chats = chats; window.store = store;
     await page.fill('.wit-ask-input', '확인');
     await page.click('.wit-ask-row button >> text=보내기');
     await page.waitForFunction(() => window.profileCall === 'p1');
-    assert.match(await page.evaluate(() => window.aiPrompt[0].content), /Additional instructions from the user[\s\S]*한국어로 써줘$/);
+    assert.match(await page.evaluate(() => window.aiPrompt[0].content), /^MY ASK RULES\n\nReply with JSON only[\s\S]*Additional instructions from the user[\s\S]*한국어로 써줘$/);
     assert.deepEqual(await page.evaluate(() => window.profileOverride), { reasoning_effort: 'min' }, 'thinking off by default');
     await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
 
@@ -339,7 +349,7 @@ window.chats = chats; window.store = store;
     await endGeneration();
     await page.waitForFunction(() => window.profileCall === 'p1');
     const track = await page.evaluate(() => window.aiPrompt);
-    assert.match(track[0].content, /Read NEW CHAT and report only lasting changes/);
+    assert.match(track[0].content, /^MY TRACK RULES\n\nReply with JSON only/);
     const chatPart = track[1].content.split('## NEW CHAT (oldest first)')[1];
     assert.ok(chatPart.includes('A user 0') && chatPart.includes('A lena 2'), 'hidden messages are read');
     assert.ok(!chatPart.includes('B lena'), 'the newest turns wait');
@@ -384,6 +394,14 @@ window.chats = chats; window.store = store;
     assert.ok(again.includes('B lena 1') && again.includes('A lena 2') && !again.includes('A lena 0'), 'the latest 3 turns');
     await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
     await page.evaluate(() => { window.confirmAnswer = 1; });
+
+    // 15. "기본값으로" brings the built-in rules back.
+    await page.click('.wit-tabs button[data-tab=setup]');
+    await page.click('.wit-rules >> nth=1 >> button >> text=기본값으로');
+    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.askPrompt, s.trackPrompt]; }), ['MY ASK RULES', null]);
+    assert.match(await page.inputValue('.wit-rules-text >> nth=1'), /^You maintain the World Info[\s\S]*Read NEW CHAT/);
+    assert.match(await page.textContent('.wit-rules >> nth=1'), /기본값/);
+    if (shots) { await page.evaluate(() => document.querySelector('.wit-advanced').scrollIntoView()); await page.screenshot({ path: path.join(shots, '11-rules.png') }); }
 
     // Phone width.
     await page.setViewportSize({ width: 390, height: 760 });

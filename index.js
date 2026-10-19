@@ -7,7 +7,7 @@ import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
     pickDetails, buildAiMessages, buildTrackMessages, recentChatLines, parseAiResult, lineDiff, applyEdits,
-    DEFAULT_EXTRA_PROMPT, validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
+    DEFAULT_EXTRA_PROMPT, DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES, FORMAT_LOCKED, validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -54,6 +54,9 @@ function settings() {
     c.extensionSettings[KEY].autoEvery ??= 30;
     c.extensionSettings[KEY].trackTags ??= 'Status';
     c.extensionSettings[KEY].customPrompt ??= '';
+    // null = use the built-in rules; a string = the user's own version.
+    c.extensionSettings[KEY].askPrompt ??= null;
+    c.extensionSettings[KEY].trackPrompt ??= null;
     // One-time: put the naming rule into the user's own instructions (kept if they already have some).
     if (!c.extensionSettings[KEY].namingSeeded) {
         const own = String(c.extensionSettings[KEY].customPrompt).trim();
@@ -129,6 +132,8 @@ async function writeVars(changes, source, key = chatKey(), { track = false } = {
     await c.saveMetadata();
     return applied;
 }
+const RULE_DEFAULTS = { ask: DEFAULT_ASK_RULES, track: DEFAULT_TRACK_RULES };
+const rulesFor = kind => (typeof settings()[`${kind}Prompt`] === 'string' ? settings()[`${kind}Prompt`] : RULE_DEFAULTS[kind]);
 // The variables this extension manages: ones an entry reads with {{getvar::}} and ones added here.
 // Everything else in the chat (preset variables, other tools) is left alone and never sent to the AI.
 const trackedVarNames = entries => new Set([...chatState().tracked, ...findVarRefs(entries).keys()]);
@@ -518,7 +523,7 @@ async function askAi() {
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
         const chatLines = thinTagBlocks(recentChatLines(context().chat, settings().chatTurns), parseTagList(settings().trackTags));
         const details = pickDetails(entries, { request, activeKeys, targets: new Set(aiTargets.keys()), globals: scanGlobals() });
-        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), extra: settings().customPrompt });
+        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), rules: rulesFor('ask'), extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
         aiRaw = text;
@@ -590,7 +595,7 @@ async function trackChat({ manual = false } = {}) {
         for (const [i, part] of parts.entries()) {
             if (parts.length > 1) { aiNote = `대화를 읽는 중… (${i + 1}/${parts.length})`; render(); }
             const details = pickTrackDetails(entries, part.join('\n'), { budget: TRACK_BODY_BUDGET, globals: scanGlobals() });
-            const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
+            const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, rules: rulesFor('track'), extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
             const reply = await callAi(messages, controller.signal);
             if (controller.signal.aborted || key !== chatKey()) return;
             aiRaw = reply;
@@ -1141,6 +1146,32 @@ function buildSetup() {
     const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 8;
     prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
     prompt.addEventListener('input', () => { settings().customPrompt = prompt.value; context().saveSettingsDebounced(); });
+    // Editable AI rules; the reply format stays locked and is only shown.
+    const ruleBox = (kind, title, hint) => {
+        const key = `${kind}Prompt`, defaults = RULE_DEFAULTS[kind];
+        const wrap = el('div', 'wit-rules');
+        const area = el('textarea', 'wit-rules-text'); area.rows = 14; area.spellcheck = false; area.setAttribute('aria-label', title);
+        const count = el('small', 'wit-muted');
+        const refresh = () => { count.textContent = `약 ${area.value.length.toLocaleString()}자${settings()[key] === null ? ' · 기본값' : ' · 내가 고침'}`; };
+        area.addEventListener('input', () => {
+            settings()[key] = area.value === defaults ? null : area.value;
+            context().saveSettingsDebounced(); refresh();
+        });
+        const reset = button('기본값으로', () => {
+            settings()[key] = null; area.value = defaults; context().saveSettingsDebounced(); refresh();
+        }, 'wit-quiet', '내가 고친 내용을 지우고 기본 규칙으로 되돌려요');
+        const top = el('div', 'wit-rules-top'); top.append(el('strong', '', title), reset);
+        wrap.append(top, el('small', 'wit-muted', hint), area, count);
+        return { wrap, fill: () => { if (document.activeElement !== area) area.value = typeof settings()[key] === 'string' ? settings()[key] : defaults; refresh(); } };
+    };
+    const askRules = ruleBox('ask', 'AI 탭 요청 지시문', 'AI 탭에서 요청을 보낼 때 맨 앞에 붙어요.');
+    const trackRules = ruleBox('track', '자동 추적 지시문', '자동 추적과 지금 확인에 맨 앞에 붙어요.');
+    const locked = el('details', 'wit-locked');
+    locked.append(el('summary', '', '고정 부분 (답변 형식) 보기 · 수정할 수 없어요'), el('pre', 'wit-preview', FORMAT_LOCKED),
+        el('small', 'wit-muted', '위 지시문 바로 뒤에 항상 붙어요. 확장이 이 형식으로 답을 읽어서 카드와 값 변경을 만들어요.'));
+    const advanced = el('details', 'wit-advanced');
+    advanced.append(el('summary', '', 'AI 지시문 (고급)'), el('small', 'wit-muted', '단어 하나로도 결과가 달라져요. 마음대로 고쳐도 되고, 답변 형식은 잠겨 있어서 망가지지 않아요. 글자 수만큼 요청마다 토큰이 들어요. 영어로 쓰는 게 가장 잘 따라요.'),
+        askRules.wrap, trackRules.wrap, locked);
     const row = (label, input, unit, hint) => {
         const wrap = el('label', 'wit-setup-row');
         wrap.append(el('span', 'wit-setup-label', label), input);
@@ -1159,6 +1190,7 @@ function buildSetup() {
         row('자동 추적', autoOn, '', '켜면 대화가 쌓일 때 AI가 월드인포를 확인해요. 값 변화는 바로 적용하고, 낡은 정보·새 설정은 AI 탭에 제안으로 남겨요. 켠 시점부터 세요.'),
         row('읽는 주기', every, '턴마다', '캐릭터 응답 N개마다 한 번. 최신 2턴은 확정될 때까지 기다려요. 숨긴 메시지도 읽으니 요약 확장과 상관없이 동작해요.'),
         row('상태창 태그', tags, '', '메시지마다 반복되는 <Status>…</Status> 같은 블록은 가장 최근 것만 보내서 아껴요. 비우면 끔.'),
+        advanced,
         el('h4', '', '추가 지시'),
         prompt,
         el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요. 처음 한 번 이름·개념 규칙이 미리 채워져 있어요. 자유롭게 고치거나 지워도 돼요.'),
@@ -1170,6 +1202,7 @@ function buildSetup() {
         if (profile.value !== s.profileId) profile.value = '';
         profileHint.textContent = list.length ? '월드인포 작업에만 다른 모델을 쓰고 싶을 때 연결 프로필을 고르세요.' : '연결 프로필이 없어요. SillyTavern의 연결 관리자(Connection Profiles)에서 만들 수 있어요.';
         thinking.value = s.thinking; turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
+        askRules.fill(); trackRules.fill();
         autoOn.checked = Boolean(s.autoOn); if (document.activeElement !== tags) tags.value = s.trackTags;
         if (document.activeElement !== prompt) prompt.value = s.customPrompt;
     };
