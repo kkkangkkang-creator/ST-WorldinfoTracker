@@ -6,7 +6,7 @@ import {
 import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
-    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff,
+    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, AUTO_REQUEST,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -19,7 +19,7 @@ const modeLabels = { constant: '상시', keyword: '키워드', vectorized: '벡�
 
 let active = false;
 const subscriptions = [];
-let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag, toolbar, aiBox, aiInput, aiSend, aiMeta;
+let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag, toolbar, aiBox, aiInput, aiSend, aiMeta, setupBox, fillSetup;
 let tab = 'active', search = '', busy = false;
 let generation = null, result = { chat: '', phase: 'unknown', entries: [] };
 let allEntries = [], allChat = '', allError = '', allToken = 0, refreshTimer;
@@ -37,6 +37,8 @@ function settings() {
     c.extensionSettings[KEY].profileId ??= '';
     c.extensionSettings[KEY].chatTurns ??= 10;
     c.extensionSettings[KEY].maxTokens ??= 4096;
+    c.extensionSettings[KEY].autoEvery ??= 0;
+    c.extensionSettings[KEY].customPrompt ??= '';
     return c.extensionSettings[KEY];
 }
 
@@ -53,7 +55,9 @@ function chatState() {
     const toggles = {};
     for (const [k, v] of Object.entries(saved.toggles || {})) if (typeof v === 'boolean') toggles[k] = v;
     const proposals = Array.isArray(saved.proposals) ? saved.proposals.filter(p => p && p.id && typeof p.content === 'string') : [];
-    return { replaced, toggles, proposals };
+    // Message count at the last automatic check.
+    const autoAt = Number.isInteger(saved.autoAt) ? saved.autoAt : null;
+    return { replaced, toggles, proposals, autoAt };
 }
 async function writeChatState(update, key) {
     const c = context();
@@ -357,8 +361,19 @@ async function openEditor(item, options = {}) {
 
 // ---------- AI ----------
 let aiBusy = false, aiAbort = null, aiError = '';
+// Older builds don't expose the profile service on getContext(); shared.js always has it.
+let sharedServices = null;
+async function loadSharedServices() {
+    try { sharedServices = await import('../../shared.js'); } catch (error) { console.warn('[WorldInfo Tracker] Connection service module unavailable', error); }
+}
+function connectionService() { return context().ConnectionManagerRequestService || sharedServices?.ConnectionManagerRequestService; }
 function profiles() {
-    try { return context().ConnectionManagerRequestService?.getSupportedProfiles?.() ?? []; } catch { return []; }
+    const c = context();
+    if (c.extensionSettings?.disabledExtensions?.includes('connection-manager')) return [];
+    const rows = c.extensionSettings?.connectionManager?.profiles || [], service = connectionService();
+    return rows.filter(p => {
+        try { return p?.id && (service?.isProfileSupported ? service.isProfileSupported(p) : ['openai', 'textgenerationwebui'].includes(c.CONNECT_API_MAP?.[p.api]?.selected)); } catch { return false; }
+    });
 }
 function connectionLabel() {
     const id = settings().profileId;
@@ -369,7 +384,7 @@ async function callAi(messages, signal) {
     const c = context(), s = settings();
     try {
         if (s.profileId) {
-            const service = c.ConnectionManagerRequestService;
+            const service = connectionService();
             if (typeof service?.sendRequest !== 'function') throw new Error('연결 프로필 요청을 지원하지 않는 SillyTavern 버전이에요.');
             const res = await service.sendRequest(s.profileId, messages, s.maxTokens, { stream: false, signal, extractData: true, includePreset: true, includeInstruct: true });
             return typeof res === 'string' ? res : String(res?.content ?? '');
@@ -380,19 +395,21 @@ async function callAi(messages, signal) {
         throw new Error(`AI 요청 실패: ${error.cause?.message || error.message}`);
     }
 }
-async function askAi() {
-    const key = chatKey(), request = aiInput.value.trim();
+async function askAi({ auto = false } = {}) {
+    const key = chatKey(), request = auto ? AUTO_REQUEST : aiInput.value.trim();
     if (!key) { notify('채팅을 먼저 열어주세요.'); return; }
     if (!request) { notify('요청을 적어주세요.'); return; }
-    if (isGenerating()) { notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
+    if (isGenerating()) { if (!auto) notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
     if (aiBusy) return;
     const controller = new AbortController();
     aiBusy = true; aiAbort = controller; aiError = ''; render();
     try {
         const entries = await getSortedEntries();
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
-        const details = pickDetails(entries, { request, activeKeys, globals: scanGlobals() });
-        const messages = buildAiMessages({ request, entries, details, chatLines: recentChatLines(context().chat, settings().chatTurns) });
+        const chatLines = recentChatLines(context().chat, settings().chatTurns);
+        // An automatic check has no request text, so entries named in the recent chat get priority.
+        const details = pickDetails(entries, { request: auto ? chatLines.join('\n') : request, activeKeys, globals: scanGlobals() });
+        const messages = buildAiMessages({ request, entries, details, chatLines, extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
         const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
@@ -400,22 +417,40 @@ async function askAi() {
         let dropped = 0;
         for (const [i, p] of parseProposals(text).entries()) {
             const id = `${time}-${i}`;
-            if (p.action === 'create') { ready.push({ ...p, id, request }); continue; }
+            if (p.action === 'create') { ready.push({ ...p, id, request: auto ? '' : request, auto }); continue; }
             // Only entries the AI saw in full may be rewritten.
             const target = detailed.get(entryKey(p.world, p.uid));
             if (!target) { dropped++; continue; }
-            ready.push({ ...p, id, request, world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
+            ready.push({ ...p, id, request: auto ? '' : request, auto, world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
         }
         await writeChatState(s => { s.proposals = [...ready, ...s.proposals]; }, key);
-        aiInput.value = '';
-        if (!ready.length) notify(dropped ? 'AI가 내용을 보지 못한 엔트리만 고치려 해서 버렸어요.' : 'AI가 바꿀 게 없다고 했어요.');
-        else if (dropped) notify(`제안 ${ready.length}개 · 내용을 보지 못한 엔트리 수정 ${dropped}개는 버렸어요.`);
+        if (auto) {
+            if (ready.length) notify(`AI가 월드인포 변경안 ${ready.length}개를 제안했어요. 트래커의 AI 탭에서 확인하세요.`);
+        } else {
+            aiInput.value = '';
+            if (!ready.length) notify(dropped ? 'AI가 내용을 보지 못한 엔트리만 고치려 해서 버렸어요.' : 'AI가 바꿀 게 없다고 했어요.');
+            else if (dropped) notify(`제안 ${ready.length}개 · 내용을 보지 못한 엔트리 수정 ${dropped}개는 버렸어요.`);
+        }
     } catch (error) {
-        if (!controller.signal.aborted) aiError = error.message || String(error);
+        if (!controller.signal.aborted) aiError = `${auto ? '자동 제안 · ' : ''}${error.message || String(error)}`;
     } finally {
         if (aiAbort === controller) { aiBusy = false; aiAbort = null; }
         render();
     }
+}
+// Every N chat messages (swipes don't count), check the lorebook in the background.
+async function maybeAutoCheck() {
+    const every = settings().autoEvery, key = chatKey();
+    if (!active || !every || !key || aiBusy || isGenerating()) return;
+    const count = (context().chat || []).filter(x => x && !x.is_system).length;
+    const { autoAt } = chatState();
+    try {
+        // First sight of a chat (or deleted messages) only sets the starting point.
+        if (autoAt === null || count < autoAt) { await writeChatState(s => { s.autoAt = count; }, key); return; }
+        if (count - autoAt < every) return;
+        await writeChatState(s => { s.autoAt = count; }, key);
+    } catch { return; }
+    await askAi({ auto: true });
 }
 function cancelAi() { aiAbort?.abort(); aiBusy = false; aiAbort = null; render(); }
 async function dropProposal(id, key = chatKey()) {
@@ -482,6 +517,7 @@ function proposalCard(p) {
     const inChat = !isCreate && (p.world === chatBook() || chatState().replaced.some(r => r.world === p.world && String(r.uid) === String(p.uid)));
     const head = el('div', 'wit-card-head');
     head.append(el('span', `wit-kind is-${p.action}`, isCreate ? '새 엔트리' : '수정'), el('strong', '', p.comment || (isCreate ? '제목 없음' : `엔트리 ${p.uid}`)));
+    if (p.auto) head.append(el('span', 'wit-tag', '자동'));
     card.append(head, el('small', 'wit-muted', isCreate ? '📗 이 방 전용 책에 추가' : inChat ? '📗 이 방' : `📘 ${p.world} · 공용`));
     if (p.reason) card.append(el('p', 'wit-reason', p.reason));
     if (isCreate) {
@@ -506,7 +542,8 @@ function proposalCard(p) {
     return card;
 }
 function renderAi() {
-    aiMeta.textContent = `${connectionLabel()} · 최근 대화 ${settings().chatTurns}턴 포함`;
+    const s = settings();
+    aiMeta.textContent = `${connectionLabel()} · 최근 대화 ${s.chatTurns}턴${s.autoEvery ? ` · ${s.autoEvery}챗마다 자동` : ''}`;
     aiSend.textContent = aiBusy ? '취소' : '보내기';
     aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
     if (aiBusy) body.append(el('p', 'wit-note', 'AI가 엔트리를 살펴보는 중…'));
@@ -610,12 +647,15 @@ function render() {
         b.classList.toggle('is-active', b.dataset.tab === tab);
         if (b.dataset.tab === 'ai') b.textContent = pending ? `AI ${pending}` : 'AI';
     }
-    toolbar.hidden = tab === 'ai';
+    toolbar.hidden = tab === 'ai' || tab === 'setup';
     aiBox.hidden = tab !== 'ai';
+    setupBox.hidden = tab !== 'setup';
+    body.hidden = tab === 'setup';
     body.replaceChildren();
-    if (!chatKey()) body.append(el('p', 'wit-empty', '채팅을 열어주세요.'));
+    if (!chatKey() && tab !== 'setup') body.append(el('p', 'wit-empty', '채팅을 열어주세요.'));
     else if (tab === 'active') renderActive();
     else if (tab === 'ai') renderAi();
+    else if (tab === 'setup') { /* persistent form */ }
     else renderAll();
     status.textContent = busy ? '저장 중…' : isGenerating() ? '생성 중에는 저장할 수 없어요' : '';
 }
@@ -724,8 +764,8 @@ function buildUI() {
     subtitle = el('p', 'wit-muted'); titles.append(subtitle);
     header.append(titles, button('×', () => setPanelOpen(false), 'wit-close', '닫기'));
     const tabs = el('div', 'wit-tabs');
-    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체 엔트리'], ['ai', 'AI']]) {
-        const b = button(label, () => { tab = kind; render(); refreshAll(); });
+    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체'], ['ai', 'AI'], ['setup', '설정']]) {
+        const b = button(label, () => { tab = kind; if (kind === 'setup') fillSetup(); render(); refreshAll(); });
         b.dataset.tab = kind; tabs.append(b);
     }
     toolbar = el('div', 'wit-toolbar');
@@ -740,12 +780,64 @@ function buildUI() {
     aiMeta = el('small', 'wit-muted');
     const askRow = el('div', 'wit-ask-row'); askRow.append(aiMeta, aiSend);
     aiBox.append(aiInput, askRow);
+    setupBox = buildSetup();
     body = el('div', 'wit-body');
     status = el('footer', 'wit-status'); status.setAttribute('role', 'status');
-    panel.append(header, tabs, toolbar, aiBox, body, status);
+    panel.append(header, tabs, toolbar, aiBox, setupBox, body, status);
     document.body.append(launcher, panel);
     showFloatingIcon();
     render();
+}
+// Settings tab: a persistent form, so typing is never interrupted by re-renders.
+function buildSetup() {
+    const box = el('div', 'wit-setup'); box.hidden = true;
+    isolateKeys(box);
+    const save = () => { context().saveSettingsDebounced(); render(); };
+    const profile = el('select');
+    profile.addEventListener('change', () => { settings().profileId = profile.value; save(); });
+    const profileHint = el('small', 'wit-muted');
+    const number = (name, min, max) => {
+        const input = el('input'); input.type = 'number'; input.inputMode = 'numeric'; input.min = String(min); input.max = String(max);
+        input.addEventListener('change', () => {
+            const n = Math.round(Number(input.value));
+            if (Number.isFinite(n) && input.value !== '') settings()[name] = Math.min(max, Math.max(min, n));
+            input.value = String(settings()[name]); save();
+        });
+        return input;
+    };
+    const turns = number('chatTurns', 0, 100), every = number('autoEvery', 0, 200), tokens = number('maxTokens', 256, 32000);
+    const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 5;
+    prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
+    prompt.addEventListener('input', () => { settings().customPrompt = prompt.value; context().saveSettingsDebounced(); });
+    const row = (label, input, unit, hint) => {
+        const wrap = el('label', 'wit-setup-row');
+        wrap.append(el('span', 'wit-setup-label', label), input);
+        if (unit) wrap.append(el('span', 'wit-muted', unit));
+        const group = el('div', 'wit-setup-group'); group.append(wrap);
+        if (hint) group.append(hint instanceof Node ? hint : el('small', 'wit-muted', hint));
+        return group;
+    };
+    box.append(
+        el('h4', '', 'AI'),
+        row('연결', profile, '', profileHint),
+        row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수'),
+        row('자동 제안', every, '챗마다', '0이면 꺼짐. 메시지가 이만큼 쌓일 때마다 AI가 알아서 변경안을 제안해요 (스와이프는 안 셈).'),
+        row('최대 토큰', tokens, '', 'AI 응답 길이 한도'),
+        el('h4', '', '추가 지시'),
+        prompt,
+        el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요.'),
+    );
+    fillSetup = () => {
+        const s = settings(), list = profiles();
+        profile.replaceChildren(new Option('현재 채팅 API', ''), ...list.map(p => new Option(p.name || p.id, p.id)));
+        profile.value = s.profileId;
+        if (profile.value !== s.profileId) profile.value = '';
+        profileHint.textContent = list.length ? '월드인포 작업에만 다른 모델을 쓰고 싶을 때 연결 프로필을 고르세요.' : '연결 프로필이 없어요. SillyTavern의 연결 관리자(Connection Profiles)에서 만들 수 있어요.';
+        turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
+        if (document.activeElement !== prompt) prompt.value = s.customPrompt;
+    };
+    profile.addEventListener('focus', fillSetup);
+    return box;
 }
 function buildSettings() {
     const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
@@ -764,31 +856,8 @@ function buildSettings() {
     const size = el('input'); size.type = 'range'; size.min = '24'; size.max = '72'; size.step = '1'; size.value = String(floatingSize);
     size.addEventListener('input', () => setFloatingSize(size.value));
     const sizeRow = el('label', 'wit-size', '아이콘 크기'); sizeRow.append(size);
-    // AI connection: the current chat API, or a Connection Manager profile.
-    const profile = el('select', 'text_pole');
-    const fillProfiles = () => {
-        const current = settings().profileId;
-        profile.replaceChildren(new Option('현재 채팅 API', ''), ...profiles().map(p => new Option(p.name, p.id)));
-        profile.value = current;
-        if (profile.value !== current) profile.value = '';
-    };
-    fillProfiles();
-    profile.addEventListener('focus', fillProfiles);
-    profile.addEventListener('change', () => { settings().profileId = profile.value; context().saveSettingsDebounced(); render(); });
-    const numberSetting = (label, name, min, max) => {
-        const input = el('input', 'text_pole'); input.type = 'number'; input.min = String(min); input.max = String(max); input.value = String(settings()[name]);
-        input.addEventListener('change', () => {
-            const n = Math.round(Number(input.value));
-            settings()[name] = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : settings()[name];
-            input.value = String(settings()[name]); context().saveSettingsDebounced(); render();
-        });
-        const row = el('label', 'wit-setting', label); row.append(input);
-        return row;
-    };
-    const profileRow = el('label', 'wit-setting', 'AI 연결'); profileRow.append(profile);
-    content.append(actions, showRow, sizeRow, el('hr', 'sysHR'), profileRow,
-        numberSetting('함께 보낼 최근 대화 (턴)', 'chatTurns', 0, 100), numberSetting('AI 응답 최대 토큰', 'maxTokens', 256, 32000),
-        el('small', '', '마법봉(🪄) 메뉴에서도 열 수 있어요.'));
+    content.append(actions, showRow, sizeRow,
+        el('small', '', 'AI 연결·프롬프트는 패널의 설정 탭에서 정해요. 마법봉(🪄) 메뉴에서도 열 수 있어요.'));
     drawer.append(header, content); wrap.append(drawer); host.append(wrap);
 }
 function buildMenuItem() {
@@ -837,6 +906,7 @@ export function onEnable() {
     for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) listen(event_types[name], () => {
         if (result.phase === 'pending') result.phase = 'unknown';
         generation = null; render();
+        if (name === 'GENERATION_ENDED') setTimeout(maybeAutoCheck, 300);
     });
     listen(event_types.CHAT_CHANGED, () => {
         generation = null; result = { chat: '', phase: 'unknown', entries: [] };
@@ -846,6 +916,7 @@ export function onEnable() {
         closeDialog(); scheduleRefresh();
     });
     for (const name of ['WORLDINFO_UPDATED', 'WORLDINFO_SETTINGS_UPDATED', 'CHARACTER_EDITED']) listen(event_types[name], scheduleRefresh);
+    loadSharedServices();
     listen(event_types.APP_READY, init);
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
 }

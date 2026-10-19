@@ -33,6 +33,13 @@ export async function getSortedEntries() {
     return [...payload.chatLore, ...payload.globalLore];
 }
 `;
+// getContext() in the mock lacks the profile service, like older SillyTavern builds.
+const sharedMock = `
+export const ConnectionManagerRequestService = {
+    isProfileSupported: p => p.api === 'openai',
+    sendRequest: async (id, messages) => { window.profileCall = id; window.aiPrompt = messages; return { content: window.aiReply }; },
+};
+`;
 const page0 = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="${prefix}style.css"></head><body>
 <div id="extensions_settings"></div><div id="extensionsMenu"></div>
 <script>
@@ -41,7 +48,9 @@ window.books = { AU: { entries: {
     2: { uid: 2, comment: '헌터물 기본 설정 보강', key: [], content: 'Around two weeks remain. roughly two weeks remaining.', constant: true, disable: true, order: 101 },
     5: { uid: 5, comment: '탑 내부', key: ['탑', 'tower'], keysecondary: ['2층'], content: 'Inside the tower', constant: false, disable: false },
 } } };
-const chats = { A: {}, B: {} }, store = new Map(), extensionSettings = {};
+const chats = { A: {}, B: {} }, store = new Map();
+const extensionSettings = { disabledExtensions: [], connectionManager: { profiles: [{ id: 'p1', name: 'Flash', api: 'openai' }, { id: 'p2', name: 'Novel', api: 'novel' }] } };
+window.extensionSettings = extensionSettings;
 window.currentChat = 'A';
 window.chat = [{ name: 'User', mes: '탑 2층 공략은 언제야?' }, { name: 'Lena', mes: '아직 몰라.' }];
 window.SillyTavern = {
@@ -71,7 +80,7 @@ window.chats = chats; window.store = store;
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
     await page.route('http://st.test/**', route => {
         const url = new URL(route.request().url());
-        const body = url.pathname === '/' ? page0 : url.pathname === '/script.js' ? scriptMock : url.pathname === '/scripts/world-info.js' ? worldInfoMock
+        const body = url.pathname === '/scripts/extensions/shared.js' ? sharedMock : url.pathname === '/' ? page0 : url.pathname === '/script.js' ? scriptMock : url.pathname === '/scripts/world-info.js' ? worldInfoMock
             : url.pathname.startsWith(prefix) ? fs.readFileSync(path.join(root, url.pathname.slice(prefix.length)), 'utf8') : null;
         if (body === null) return route.fulfill({ status: 404, body: '' });
         const type = url.pathname.endsWith('.css') ? 'text/css' : url.pathname === '/' ? 'text/html' : 'text/javascript';
@@ -119,12 +128,12 @@ window.chats = chats; window.store = store;
     // 3. In this chat the original is hidden and the copy loads instead.
     let loaded = await page.evaluate(async () => (await import('/scripts/world-info.js')).getSortedEntries().then(l => l.map(e => `${e.world}#${e.uid}`)));
     assert.deepEqual(loaded, [`${book}#0`, 'AU#0', 'AU#5']);
-    await page.click('.wit-tabs button >> text=전체 엔트리');
+    await page.click('.wit-tabs button[data-tab=all]');
     await page.waitForSelector('.wit-tag >> text=수정본');
     if (shots) await page.screenshot({ path: path.join(shots, '3-all.png') });
 
     // 4. Clicking the stale original in "이번 응답" opens the copy, not a second copy.
-    await page.click('.wit-tabs button >> text=이번 응답');
+    await page.click('.wit-tabs button[data-tab=active]');
     await page.click('.wit-row >> text=헌터물 기본 설정 보강');
     await page.waitForSelector('.wit-dialog');
     assert.match(await page.textContent('.wit-where'), /현재: 📗 이 방 전용 · 원본 AU/);
@@ -152,7 +161,7 @@ window.chats = chats; window.store = store;
 
     // Phone width: a long entry still shows the save buttons without scrolling the dialog.
     await page.setViewportSize({ width: 390, height: 760 });
-    await page.click('.wit-tabs button >> text=전체 엔트리');
+    await page.click('.wit-tabs button[data-tab=all]');
     await page.click('.wit-row >> text=헌터물 기본 설정 보강');
     await page.waitForSelector('.wit-dialog');
     await page.fill('.wit-dialog textarea.wit-content', 'line\n'.repeat(200));
@@ -166,7 +175,7 @@ window.chats = chats; window.store = store;
     await page.evaluate(async () => { window.currentChat = 'B'; await window.eventSource.emit('CHAT_CHANGED'); });
     loaded = await page.evaluate(async () => (await import('/scripts/world-info.js')).getSortedEntries().then(l => l.map(e => `${e.world}#${e.uid}`)));
     assert.deepEqual(loaded, ['AU#0', 'AU#2', 'AU#5']);
-    await page.click('.wit-tabs button >> text=전체 엔트리');
+    await page.click('.wit-tabs button[data-tab=all]');
     await page.click('.wit-row >> text=탑 내부');
     await page.waitForSelector('.wit-dialog');
     await page.fill('.wit-dialog textarea.wit-content', 'Inside the tower (edited)');
@@ -247,6 +256,39 @@ window.chats = chats; window.store = store;
     await page.click('.wit-ask button >> text=보내기');
     await page.waitForSelector('.wit-error');
     assert.equal(await page.inputValue('.wit-ask-input'), '아무거나');
+
+    // 11. Settings tab: profile list falls back to shared.js, extra instructions reach the AI.
+    await page.click('.wit-tabs button[data-tab=setup]');
+    await page.waitForSelector('.wit-setup:not([hidden])');
+    assert.deepEqual(await page.$$eval('.wit-setup select option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
+    await page.selectOption('.wit-setup select', 'p1');
+    await page.fill('.wit-setup-prompt', '한국어로 써줘');
+    const numbers = await page.$$('.wit-setup input[type=number]');
+    await numbers[1].fill('2'); await numbers[1].press('Tab');
+    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoEvery]; }), ['p1', '한국어로 써줘', 2]);
+    if (shots) await page.screenshot({ path: path.join(shots, '8-setup.png') });
+    await page.click('.wit-tabs button[data-tab=ai]');
+    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 최근 대화 10턴 · 2챗마다 자동/);
+    await page.evaluate(() => { window.aiReply = '{"proposals":[]}'; });
+    await page.fill('.wit-ask-input', '확인');
+    await page.click('.wit-ask button >> text=보내기');
+    await page.waitForFunction(() => window.profileCall === 'p1');
+    assert.match(await page.evaluate(() => window.aiPrompt[0].content), /Additional instructions from the user[\s\S]*한국어로 써줘$/);
+    await page.waitForFunction(() => document.querySelector('.wit-ask button')?.textContent === '보내기');
+
+    // 12. Automatic proposals every 2 chat messages; swipes (no new message) don't count.
+    await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({ proposals: [{ action: 'create', comment: '자동 엔트리', keys: ['x'], content: 'auto' }] }); });
+    const endGeneration = () => page.evaluate(async () => { await window.eventSource.emit('GENERATION_ENDED'); await new Promise(r => setTimeout(r, 400)); });
+    await endGeneration(); // first sight sets the starting point
+    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.autoAt), 2);
+    await page.evaluate(() => window.chat.push({ name: 'User', mes: '1' }));
+    await endGeneration();
+    assert.equal(await page.evaluate(() => window.profileCall), null);
+    await page.evaluate(() => window.chat.push({ name: 'Lena', mes: '2' }));
+    await endGeneration();
+    await page.waitForSelector('.wit-card .wit-tag >> text=자동');
+    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## REQUEST\n\nAutomatic check/);
+    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.autoAt), 4);
 
     // Phone width.
     await page.setViewportSize({ width: 390, height: 760 });

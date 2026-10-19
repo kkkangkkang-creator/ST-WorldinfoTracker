@@ -143,3 +143,9 @@ test('line diff marks removed and added lines', () => {
     assert.deepEqual(lineDiff('a\nb\nc', 'a\nB\nc').map(x => x.type), ['same', 'del', 'add', 'same']);
     assert.deepEqual(lineDiff('', 'x').map(x => x.type), ['del', 'add']);
 });
+
+test('extra instructions are appended to the system prompt', () => {
+    const [system] = buildAiMessages({ request: 'x', entries: [], details: [], extra: '  한국어로  ' });
+    assert.match(system.content, /Additional instructions from the user[^\n]*\n한국어로$/);
+    assert.doesNotMatch(buildAiMessages({ request: 'x', entries: [], details: [] })[0].content, /Additional/);
+});

@@ -196,7 +196,9 @@ export function pickDetails(entries, { request = '', activeKeys = new Set(), bud
     return picked;
 }
 
-export function buildAiMessages({ request, entries, details, chatLines = [] }) {
+export const AUTO_REQUEST = `Automatic check (no user request). Read RECENT CHAT and propose changes only for lasting facts: something in the lorebook that is now outdated (status, ranks, timers, locations, relationships, injuries, possessions, cleared floors...), or an important new lasting fact the lorebook lacks. Ignore momentary actions, moods and dialogue. If nothing needs to change, return {"proposals":[]}. Write "reason" in the main language of the chat.`;
+
+export function buildAiMessages({ request, entries, details, chatLines = [], extra = '' }) {
     const list = entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
     const full = details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
     const user = [
@@ -205,7 +207,8 @@ export function buildAiMessages({ request, entries, details, chatLines = [] }) {
         '## RECENT CHAT (oldest first)', chatLines.join('\n') || '(none)',
         '## REQUEST', request,
     ].join('\n\n');
-    return [{ role: 'system', content: AI_SYSTEM_PROMPT }, { role: 'user', content: user }];
+    const system = extra.trim() ? `${AI_SYSTEM_PROMPT}\n\nAdditional instructions from the user (follow them unless they break the JSON format):\n${extra.trim()}` : AI_SYSTEM_PROMPT;
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
 export function recentChatLines(chat, turns, maxChars = 2000) {
