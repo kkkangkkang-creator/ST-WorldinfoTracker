@@ -6,7 +6,8 @@ import {
 import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
-    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits, AUTO_REQUEST,
+    pickDetails, buildAiMessages, buildTrackMessages, recentChatLines, parseAiResult, lineDiff, applyEdits,
+    validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -42,7 +43,16 @@ function settings() {
         if (c.extensionSettings[KEY].maxTokens === 4096) c.extensionSettings[KEY].maxTokens = 16384;
         c.extensionSettings[KEY].tokensMigrated = true;
     }
-    c.extensionSettings[KEY].autoEvery ??= 0;
+    // 0.5.0: automatic checks count character turns behind a bookmark. Older values counted
+    // messages, so start from the new defaults (off, every 30 turns).
+    if (!c.extensionSettings[KEY].trackMigrated) {
+        c.extensionSettings[KEY].autoOn = false;
+        c.extensionSettings[KEY].autoEvery = 30;
+        c.extensionSettings[KEY].trackMigrated = true;
+    }
+    c.extensionSettings[KEY].autoOn ??= false;
+    c.extensionSettings[KEY].autoEvery ??= 30;
+    c.extensionSettings[KEY].trackTags ??= 'Status';
     c.extensionSettings[KEY].customPrompt ??= '';
     c.extensionSettings[KEY].thinking ??= 'min';
     return c.extensionSettings[KEY];
@@ -61,9 +71,12 @@ function chatState() {
     const toggles = {};
     for (const [k, v] of Object.entries(saved.toggles || {})) if (typeof v === 'boolean') toggles[k] = v;
     const proposals = Array.isArray(saved.proposals) ? saved.proposals.filter(p => p && p.id && typeof p.content === 'string') : [];
-    // Message count at the last automatic check.
-    const autoAt = Number.isInteger(saved.autoAt) ? saved.autoAt : null;
-    return { replaced, toggles, proposals, autoAt };
+    // Auto tracking bookmark: chat items already read, and the signature of the last one.
+    const trackAt = Number.isInteger(saved.trackAt) && saved.trackAt >= 0 ? saved.trackAt : null;
+    const trackSig = typeof saved.trackSig === 'string' ? saved.trackSig : '';
+    const trackLast = saved.trackLast && typeof saved.trackLast === 'object' ? saved.trackLast : null;
+    const varLog = Array.isArray(saved.varLog) ? saved.varLog.filter(x => x && x.name).slice(0, 40) : [];
+    return { replaced, toggles, proposals, trackAt, trackSig, trackLast, varLog };
 }
 async function writeChatState(update, key) {
     const c = context();
@@ -73,6 +86,40 @@ async function writeChatState(update, key) {
     c.chatMetadata[KEY] = next;
     await c.saveMetadata();
 }
+
+// Chat variables are SillyTavern's own ({{getvar::name}}), stored per chat in its metadata.
+function chatVars() {
+    const raw = context().chatMetadata?.variables, out = {};
+    if (raw && typeof raw === 'object') {
+        for (const [k, v] of Object.entries(raw)) out[k] = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    }
+    return out;
+}
+const describeChanges = list => list.map(d => `${d.name} ${d.from ?? '없음'} → ${d.value ?? '삭제'}`).join(', ');
+/** value null removes the variable. Returns the changes that actually happened. */
+async function writeVars(changes, source, key = chatKey()) {
+    const c = context();
+    if (!key || key !== chatKey() || !c.chatMetadata) throw new Error('채팅이 바뀌어 저장하지 않았어요.');
+    const vars = (c.chatMetadata.variables ??= {}), before = chatVars(), next = chatState(), applied = [];
+    for (const change of changes) {
+        const name = validVarName(change.name);
+        if (!name) continue;
+        const from = Object.hasOwn(before, name) ? before[name] : null;
+        const to = change.value === null || change.value === undefined ? null : String(change.value);
+        if (from === to) continue;
+        if (to === null) { delete vars[name]; delete before[name]; } else { vars[name] = to; before[name] = to; }
+        next.varLog.unshift({ name, from, to, time: Date.now(), source, reason: change.reason || '' });
+        applied.push({ name, from, value: to, reason: change.reason || '' });
+    }
+    if (!applied.length) return applied;
+    next.varLog = next.varLog.slice(0, 40);
+    c.chatMetadata[KEY] = next;
+    await c.saveMetadata();
+    return applied;
+}
+// Variables the AI may set: ones this chat already has, or ones an entry reads.
+const knownVarNames = entries => new Set([...Object.keys(chatVars()), ...findVarRefs(entries).keys()]);
+
 function worldNames() { return context().getWorldInfoNames?.() ?? []; }
 function chatBook() {
     const name = context().chatMetadata?.[METADATA_KEY];
@@ -359,6 +406,12 @@ async function openEditor(item, options = {}) {
             aiTargets.clear(); aiTargets.set(entryKey(item.world, item.uid), entryTitle(raw));
             closeDialog(); tab = 'ai'; render(); aiInput.focus();
         }, 'wit-quiet', '이 엔트리만 AI에게 보내요'));
+        footer.append(button('값 뽑기', () => {
+            aiTargets.clear(); aiTargets.set(entryKey(item.world, item.uid), entryTitle(raw));
+            closeDialog(); tab = 'ai'; render();
+            aiInput.value = '이 엔트리에서 이야기가 진행되면 바뀌는 값(날짜·타이머·개수·랭크·소속·상태 등)을 찾아서 {{getvar::이름}} 변수로 바꿔줘. 변수의 값은 지금 채팅 기준으로 정해줘.';
+            aiInput.focus();
+        }, 'wit-quiet', 'AI가 바뀌는 값을 변수로 바꾸는 제안을 만들어요'));
         const backup = await readBackup(item.world, item.uid);
         if (backup && dialog === d) footer.append(button('저장 전 내용 불러오기', () => {
             title.value = backup.comment; keys.value = formatKeys(backup.key); keys2.value = formatKeys(backup.keysecondary);
@@ -370,7 +423,7 @@ async function openEditor(item, options = {}) {
 }
 
 // ---------- AI ----------
-let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '';
+let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '', aiNote = '';
 // Entries the user picked for the next request (entryKey -> title); empty = automatic.
 const aiTargets = new Map();
 // Older builds don't expose the profile service on getContext(); shared.js always has it.
@@ -409,71 +462,142 @@ async function callAi(messages, signal) {
         throw new Error(`AI 요청 실패: ${error.cause?.message || error.message}`);
     }
 }
-async function askAi({ auto = false } = {}) {
-    const key = chatKey(), request = auto ? AUTO_REQUEST : aiInput.value.trim();
+// Turns the model's proposals into cards. Only entries it saw in full may be changed.
+function buildReady(list, details, { request = '', auto = false } = {}) {
+    const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
+    const ready = [];
+    let dropped = 0;
+    for (const p of list) {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        if (p.action === 'create') { ready.push({ ...p, id, request, auto }); continue; }
+        const target = detailed.get(entryKey(p.world, p.uid));
+        if (!target) { dropped++; continue; }
+        if (p.edits.length) {
+            const { content, missing } = applyEdits(target.content, p.edits);
+            if (missing.length || content === target.content) { dropped++; continue; }
+            p.content = content;
+        }
+        ready.push({ ...p, id, request, auto, title: entryTitle(target), world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
+    }
+    return { ready, dropped };
+}
+const summarize = ({ applied = [], ready = [], dropped = 0 }) => [
+    applied.length ? `현재 값 ${applied.length}개 바꿈 (${describeChanges(applied)})` : '',
+    ready.length ? `제안 ${ready.length}개` : '',
+    dropped ? `맞지 않아 버린 수정 ${dropped}개` : '',
+].filter(Boolean).join(' · ');
+
+async function askAi() {
+    const key = chatKey(), request = aiInput.value.trim();
     if (!key) { notify('채팅을 먼저 열어주세요.'); return; }
     if (!request) { notify('요청을 적어주세요.'); return; }
-    if (isGenerating()) { if (!auto) notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
+    if (isGenerating()) { notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
     if (aiBusy) return;
     const controller = new AbortController();
-    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = ''; render();
+    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = ''; aiNote = ''; render();
     try {
         const entries = await getSortedEntries();
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
-        const chatLines = recentChatLines(context().chat, settings().chatTurns);
-        // An automatic check has no request text, so entries named in the recent chat get priority.
-        const targets = auto ? null : new Set(aiTargets.keys());
-        const details = pickDetails(entries, { request: auto ? chatLines.join('\n') : request, activeKeys, targets, globals: scanGlobals() });
-        const messages = buildAiMessages({ request, entries, details, chatLines, extra: settings().customPrompt });
+        const chatLines = thinTagBlocks(recentChatLines(context().chat, settings().chatTurns), parseTagList(settings().trackTags));
+        const details = pickDetails(entries, { request, activeKeys, targets: new Set(aiTargets.keys()), globals: scanGlobals() });
+        const messages = buildAiMessages({ request, entries, details, chatLines, vars: chatVars(), extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
         aiRaw = text;
-        const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
-        const time = Date.now(), ready = [];
-        let dropped = 0;
-        for (const [i, p] of parseProposals(text).entries()) {
-            const id = `${time}-${i}`;
-            if (p.action === 'create') { ready.push({ ...p, id, request: auto ? '' : request, auto }); continue; }
-            // Only entries the AI saw in full may be rewritten.
-            const target = detailed.get(entryKey(p.world, p.uid));
-            if (!target) { dropped++; continue; }
-            if (p.edits.length) {
-                const { content, missing } = applyEdits(target.content, p.edits);
-                if (missing.length || content === target.content) { dropped++; continue; }
-                p.content = content;
-            }
-            ready.push({ ...p, id, request: auto ? '' : request, auto, title: entryTitle(target), world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
-        }
-        await writeChatState(s => { s.proposals = [...ready, ...s.proposals]; }, key);
-        if (auto) {
-            if (ready.length) notify(`AI가 월드인포 변경안 ${ready.length}개를 제안했어요. 트래커의 AI 탭에서 확인하세요.`);
-        } else {
-            aiInput.value = '';
-            if (!ready.length) notify(dropped ? 'AI의 수정안이 엔트리와 맞지 않아 버렸어요. 대상 엔트리를 골라서 다시 요청해보세요.' : 'AI가 바꿀 게 없다고 했어요.');
-            else if (dropped) notify(`제안 ${ready.length}개 · 엔트리와 맞지 않는 수정안 ${dropped}개는 버렸어요.`);
-        }
+        const parsed = parseAiResult(text);
+        const known = knownVarNames(entries);
+        const applied = await writeVars(parsed.vars.filter(v => known.has(v.name)), 'ask', key);
+        const { ready, dropped } = buildReady(parsed.proposals, details, { request });
+        await writeChatState(st => { st.proposals = [...ready, ...st.proposals]; }, key);
+        aiInput.value = '';
+        if (!ready.length && !applied.length) notify(dropped ? 'AI의 수정안이 엔트리와 맞지 않아 버렸어요. 대상 엔트리를 골라서 다시 요청해보세요.' : 'AI가 바꿀 게 없다고 했어요.');
+        else notify(summarize({ applied, ready, dropped }));
     } catch (error) {
-        if (!controller.signal.aborted) aiError = `${auto ? '자동 제안 · ' : ''}${error.message || String(error)}`;
+        if (!controller.signal.aborted) aiError = error.message || String(error);
     } finally {
         if (aiAbort === controller) { aiBusy = false; aiAbort = null; }
         render();
     }
 }
-// Every N chat messages (swipes don't count), check the lorebook in the background.
-async function maybeAutoCheck() {
-    const every = settings().autoEvery, key = chatKey();
-    if (!active || !every || !key || aiBusy || isGenerating()) return;
-    const count = (context().chat || []).filter(x => x && !x.is_system).length;
-    const { autoAt } = chatState();
-    try {
-        // First sight of a chat (or deleted messages) only sets the starting point.
-        if (autoAt === null || count < autoAt) { await writeChatState(s => { s.autoAt = count; }, key); return; }
-        if (count - autoAt < every) return;
-        await writeChatState(s => { s.autoAt = count; }, key);
-    } catch { return; }
-    await askAi({ auto: true });
+
+// ---------- Auto tracking ----------
+const HOLD_TURNS = 2;          // newest turns wait, so a swipe or regenerate never leaks in
+const MAX_PART_CHARS = 36000;  // one request reads at most this much chat
+const MAX_PARTS = 5;
+const TRACK_BODY_BUDGET = 16000;
+let trackRetryAt = 0;
+
+async function setBookmarkToEnd(key) {
+    const chat = context().chat || [];
+    await writeChatState(st => { st.trackAt = chat.length; st.trackSig = messageSig(chat[chat.length - 1]); }, key);
 }
-function cancelAi() { aiAbort?.abort(); aiBusy = false; aiAbort = null; render(); }
+/** Reads the new part of the chat and reports value changes (applied now), stale info and new facts (as cards). */
+async function trackChat({ manual = false } = {}) {
+    const key = chatKey(), s = settings(), chat = context().chat || [];
+    const say = text => { if (manual) notify(text); };
+    if (!key) return say('채팅을 먼저 열어주세요.');
+    if (isGenerating()) return say('응답 생성이 끝난 뒤 확인해주세요.');
+    if (aiBusy) return say('AI가 이미 일하는 중이에요.');
+    if (!manual && Date.now() < trackRetryAt) return;
+    const state = chatState(), at = relocateBookmark(chat, state.trackAt, state.trackSig);
+    if (at === null && !manual) {
+        // First sight of this chat: start counting from here, never read the past.
+        try { await setBookmarkToEnd(key); } catch (error) { console.warn('[WorldInfo Tracker]', error); }
+        return render();
+    }
+    const range = pickRange(chat, at, { every: s.autoEvery, hold: HOLD_TURNS, force: manual });
+    if (!range) return say('새로 읽을 대화가 없어요.');
+
+    const tags = parseTagList(s.trackTags);
+    const lines = thinTagBlocks(formatLines(range.messages), tags);
+    let parts = splitParts(lines, MAX_PART_CHARS), skipped = false;
+    if (parts.length > MAX_PARTS) { parts = parts.slice(-MAX_PARTS); skipped = true; }
+    const chars = parts.flat().reduce((n, line) => n + line.length, 0);
+    if (manual && chars > 60000 && !(await confirmAction('대화를 많이 읽어요', `${range.turns}턴 · 약 ${chars.toLocaleString()}자를 AI가 읽어요. 계속할까요?`))) return;
+
+    const controller = new AbortController();
+    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = '';
+    aiNote = `대화 ${range.turns}턴 · 약 ${chars.toLocaleString()}자를 읽는 중…`; render();
+    try {
+        const entries = await getSortedEntries();
+        const known = knownVarNames(entries), applied = [], allReady = [];
+        let dropped = 0;
+        for (const [i, part] of parts.entries()) {
+            if (parts.length > 1) { aiNote = `대화를 읽는 중… (${i + 1}/${parts.length})`; render(); }
+            const details = pickTrackDetails(entries, part.join('\n'), { budget: TRACK_BODY_BUDGET, globals: scanGlobals() });
+            const messages = buildTrackMessages({ lines: part, vars: chatVars(), entries, details, extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
+            const reply = await callAi(messages, controller.signal);
+            if (controller.signal.aborted || key !== chatKey()) return;
+            aiRaw = reply;
+            const parsed = parseAiResult(reply);
+            applied.push(...await writeVars(parsed.vars.filter(v => known.has(v.name)), 'auto', key));
+            const built = buildReady(parsed.proposals, details, { auto: true });
+            allReady.push(...built.ready); dropped += built.dropped;
+        }
+        // The bookmark only moves once every part has been read.
+        await writeChatState(st => {
+            st.proposals = [...allReady, ...st.proposals];
+            st.trackAt = range.end; st.trackSig = messageSig(chat[range.end - 1]);
+            st.trackLast = { time: Date.now(), turns: range.turns, chars, parts: parts.length, vars: applied.length, proposals: allReady.length, dropped, manual };
+        }, key);
+        const summary = summarize({ applied, ready: allReady, dropped });
+        if (summary || manual) notify(`${manual ? `대화 ${range.turns}턴을 읽었어요. ` : ''}${summary || '바꿀 게 없어요.'}${skipped ? ' (너무 길어서 앞부분은 건너뛰었어요)' : ''}`);
+    } catch (error) {
+        if (!controller.signal.aborted) {
+            aiError = `대화 확인 · ${error.message || String(error)}`;
+            trackRetryAt = Date.now() + 10 * 60 * 1000;
+            if (!manual) notify(`자동 추적에 실패했어요. 10분 뒤 다시 시도해요. (${error.message || error})`, true);
+        }
+    } finally {
+        if (aiAbort === controller) { aiBusy = false; aiAbort = null; aiNote = ''; }
+        render();
+    }
+}
+async function maybeAutoTrack() {
+    if (!active || !settings().autoOn || aiBusy || isGenerating() || !chatKey()) return;
+    await trackChat({ manual: false });
+}
+function cancelAi() { aiAbort?.abort(); aiBusy = false; aiAbort = null; aiNote = ''; render(); }
 async function dropProposal(id, key = chatKey()) {
     try { await writeChatState(s => { s.proposals = s.proposals.filter(p => p.id !== id); }, key); } catch (error) { notify(error.message, true); }
     render();
@@ -489,11 +613,19 @@ function proposalEdits(p, raw) {
         ? { comment: p.comment, key: p.key, keysecondary: [], content: p.content, constant: p.constant }
         : { comment: p.comment || raw?.comment || '', key: p.key.length ? p.key : (raw?.key ?? []), content: p.content };
 }
+// A proposal can carry variables its edits rely on ({{getvar::name}}); they are set when it is applied.
+async function applyProposalVars(p, key) {
+    if (!p.vars?.length) return;
+    try {
+        const done = await writeVars(p.vars.map(v => ({ name: v.name, value: v.value, reason: p.reason })), 'proposal', key);
+        if (done.length) notify(`현재 값 ${done.length}개를 정했어요: ${describeChanges(done)}`);
+    } catch (error) { notify(error.message, true); }
+}
 async function applyProposal(p, where) {
     const key = chatKey();
     if (!guard(key)) return;
     if (p.action === 'create') {
-        if (await run(() => addEntry(proposalEdits(p), key))) await dropProposal(p.id, key);
+        if (await run(() => addEntry(proposalEdits(p), key))) { await applyProposalVars(p, key); await dropProposal(p.id, key); }
         scheduleRefresh();
         return;
     }
@@ -508,12 +640,12 @@ async function applyProposal(p, where) {
         if (!(await confirmAction('공용 책에 적용할까요?', `"${target.world}"을(를) 쓰는 모든 채팅에 반영돼요.`))) return;
         ok = await run(() => saveInPlace(target.world, target.uid, edits));
     } else ok = await run(() => saveCopy({ world: target.world, uid: target.uid, disable: p.disable }, structuredClone(raw), edits, key));
-    if (ok) await dropProposal(p.id, key);
+    if (ok) { await applyProposalVars(p, key); await dropProposal(p.id, key); }
     scheduleRefresh();
 }
 async function editProposal(p) {
     const key = chatKey();
-    const onSaved = () => dropProposal(p.id, key);
+    const onSaved = async () => { await applyProposalVars(p, key); await dropProposal(p.id, key); };
     if (p.action === 'create') return openEditor(null, { draft: proposalEdits(p), onSaved });
     const target = await proposalTarget(p);
     const raw = (await context().loadWorldInfo(target.world))?.entries?.[target.uid];
@@ -553,6 +685,7 @@ function proposalCard(p) {
         if (p.key.length && formatKeys(p.key) !== formatKeys(p.baseKey)) card.append(el('small', 'wit-why', `키워드: ${formatKeys(p.baseKey) || '없음'} → ${formatKeys(p.key)}`));
         card.append(diffView(p.base, p.content));
     }
+    if (p.vars?.length) card.append(el('small', 'wit-why', `현재 값: ${p.vars.map(v => `${v.name} = ${v.value}`).join(' · ')}`));
     const actions = el('div', 'wit-card-actions');
     if (isCreate) actions.append(button('이 방에 추가', () => applyProposal(p, 'here'), 'wit-primary'));
     else if (inChat) actions.append(button('적용', () => applyProposal(p, 'here'), 'wit-primary'));
@@ -603,14 +736,39 @@ async function openTargetPicker() {
         button('자동으로', () => { aiTargets.clear(); closeDialog(); render(); }, 'wit-quiet'));
     d.append(main, footer);
 }
+const since = time => {
+    const min = Math.round((Date.now() - time) / 60000);
+    return min < 1 ? '방금' : min < 60 ? `${min}분 전` : min < 1440 ? `${Math.round(min / 60)}시간 전` : `${Math.round(min / 1440)}일 전`;
+};
+// Where the auto-tracking bookmark is, and what the last run did.
+function trackBlock() {
+    const s = settings(), chat = context().chat || [], st = chatState();
+    const at = relocateBookmark(chat, st.trackAt, st.trackSig), box = el('div', 'wit-track');
+    let line;
+    if (!s.autoOn) line = '자동 추적 꺼짐 · 설정 탭에서 켤 수 있어요';
+    else if (at === null) line = `자동 추적 · ${s.autoEvery}턴마다 · 다음 응답부터 세요`;
+    else {
+        const pending = pendingTurns(chat, at), left = Math.max(0, s.autoEvery + HOLD_TURNS - pending);
+        line = `자동 추적 · ${s.autoEvery}턴마다 · ${pending}턴 쌓임${left ? ` · ${left}턴 뒤 실행` : ' · 곧 실행'}`;
+    }
+    const top = el('div', 'wit-track-row');
+    const check = button('지금 확인', () => trackChat({ manual: true }), 'wit-quiet', '마지막으로 읽은 곳 이후의 대화를 지금 읽어요');
+    check.disabled = aiBusy || busy;
+    top.append(el('small', 'wit-muted', line), check);
+    box.append(top);
+    const last = st.trackLast;
+    if (last) box.append(el('small', 'wit-muted', `마지막 확인 ${since(last.time)} · ${last.turns}턴 읽음 · 값 ${last.vars}개 · 제안 ${last.proposals}개`));
+    return box;
+}
 function renderAi() {
     const s = settings();
     renderTargets();
     const thinking = s.profileId ? ` · 생각 ${({ min: '끔', low: '낮게', auto: '모델 기본' })[s.thinking] ?? s.thinking}` : '';
-    aiMeta.textContent = `${connectionLabel()}${thinking} · 최근 대화 ${s.chatTurns}턴${s.autoEvery ? ` · ${s.autoEvery}챗마다 자동` : ''}`;
+    aiMeta.textContent = `${connectionLabel()}${thinking} · 최근 대화 ${s.chatTurns}턴`;
     aiSend.textContent = aiBusy ? '취소' : '보내기';
     aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
-    if (aiBusy) body.append(el('p', 'wit-note', 'AI가 엔트리를 살펴보는 중…'));
+    body.append(trackBlock());
+    if (aiBusy) body.append(el('p', 'wit-note', aiNote || 'AI가 엔트리를 살펴보는 중…'));
     if (aiError) {
         body.append(el('p', 'wit-error', aiError));
         if (aiRaw.trim()) {
@@ -624,6 +782,64 @@ function renderAi() {
         body.append(el('p', 'wit-empty', 'AI 제안은 바로 저장되지 않아요.\n확인하고 적용할 것만 고르면 돼요.'));
     }
     for (const p of proposals) body.append(proposalCard(p));
+}
+
+// ---------- 현재 값 (chat variables) ----------
+async function saveVar(name, value, source = 'user') {
+    try {
+        const done = await writeVars([{ name, value }], source);
+        if (done.length) notify(`${describeChanges(done)} · 다음 응답부터 적용돼요`);
+    } catch (error) { notify(error.message, true); }
+    render(true);
+}
+function varRow(name, value, titles, log, missing = false) {
+    const row = el('div', `wit-var${missing ? ' is-missing' : ''}`);
+    const head = el('div', 'wit-var-head');
+    const input = el('input'); input.value = value; input.placeholder = missing ? '값을 적어주세요' : '';
+    input.setAttribute('aria-label', `${name} 값`);
+    input.addEventListener('change', () => saveVar(name, input.value.trim()));
+    const label = el('label', 'wit-var-field'); label.append(el('span', 'wit-var-name', name), input);
+    head.append(label);
+    if (!missing) {
+        head.append(button('✕', async () => {
+            if (await confirmAction('변수를 지울까요?', `"${name}"을(를) 쓰는 엔트리는 그 자리가 빈칸이 돼요.`)) { await saveVar(name, null); }
+        }, 'wit-quiet', `${name} 지우기`));
+    }
+    row.append(head);
+    if (titles?.length) row.append(el('small', 'wit-muted', `쓰는 엔트리: ${titles.join(', ')}`));
+    else if (!missing) row.append(el('small', 'wit-muted', '쓰는 엔트리 없음'));
+    if (log && !missing) {
+        const note = el('small', 'wit-var-log', `${log.source === 'user' ? '직접' : 'AI'} ${since(log.time)} · ${log.from ?? '없음'} → ${log.to ?? '삭제'}`);
+        if (log.from !== null && chatVars()[name] === log.to) note.append(' ', button('되돌리기', () => saveVar(name, log.from, 'user'), 'wit-link'));
+        row.append(note);
+    }
+    return row;
+}
+function renderVars() {
+    const vars = chatVars(), loaded = allChat === chatKey(), refs = loaded ? findVarRefs(allEntries) : new Map(), log = chatState().varLog;
+    body.append(el('p', 'wit-note', '이 채팅의 값이에요. 엔트리 본문에 {{getvar::이름}}이라고 쓰면 이 값으로 바뀌어 들어가요 · 다음 응답부터 적용'));
+    const names = Object.keys(vars);
+    for (const name of names) body.append(varRow(name, vars[name], refs.get(name), log.find(l => l.name === name)));
+    if (!names.length) body.append(el('p', 'wit-empty', '아직 값이 없어요.\n아래에서 추가하거나, 엔트리 수정 창의 "값 뽑기"로 AI에게 맡길 수 있어요.'));
+    const missing = [...refs.keys()].filter(n => !Object.hasOwn(vars, n));
+    if (missing.length) {
+        const warn = el('section', 'wit-var-missing');
+        warn.append(el('h4', '', '⚠ 값이 없는 변수 · 엔트리에서 쓰고 있어요'));
+        for (const name of missing) warn.append(varRow(name, '', refs.get(name), null, true));
+        body.append(warn);
+    }
+    const add = el('form', 'wit-var-add');
+    const name = el('input'); name.placeholder = '이름 (예: 2층_Break)'; name.setAttribute('aria-label', '새 변수 이름');
+    const value = el('input'); value.placeholder = '값'; value.setAttribute('aria-label', '새 변수 값');
+    const go = button('＋ 추가', () => {}, 'wit-primary'); go.type = 'submit';
+    add.addEventListener('submit', event => {
+        event.preventDefault();
+        const n = validVarName(name.value);
+        if (!n) { notify('이름에는 { } :: 와 줄바꿈을 쓸 수 없어요.'); return; }
+        saveVar(n, value.value.trim());
+    });
+    add.append(name, value, go);
+    body.append(add);
 }
 
 function whyLine(entry) {
@@ -708,9 +924,11 @@ function renderAll() {
     body.append(el('p', 'wit-note', `이 채팅에 연결된 엔트리 ${allEntries.length}개 · ON/OFF는 이 채팅만`));
     renderEntries(allEntries);
 }
-function render() {
+function render(force = false) {
     updateBadge();
     if (!panel || panel.hidden) return;
+    // Don't rebuild the value list under someone who is typing in it.
+    if (!force && tab === 'vars' && body.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
     const book = chatBook();
     subtitle.textContent = chatKey() ? (book ? `이 방 전용 책: ${book}` : '이 방 전용 책: 아직 없음 · 처음 저장할 때 만들어요') : '채팅을 열어주세요';
     const pending = chatKey() ? chatState().proposals.length : 0;
@@ -718,7 +936,7 @@ function render() {
         b.classList.toggle('is-active', b.dataset.tab === tab);
         if (b.dataset.tab === 'ai') b.textContent = pending ? `AI ${pending}` : 'AI';
     }
-    toolbar.hidden = tab === 'ai' || tab === 'setup';
+    toolbar.hidden = tab !== 'active' && tab !== 'all';
     aiBox.hidden = tab !== 'ai';
     setupBox.hidden = tab !== 'setup';
     body.hidden = tab === 'setup';
@@ -726,6 +944,7 @@ function render() {
     if (!chatKey() && tab !== 'setup') body.append(el('p', 'wit-empty', '채팅을 열어주세요.'));
     else if (tab === 'active') renderActive();
     else if (tab === 'ai') renderAi();
+    else if (tab === 'vars') renderVars();
     else if (tab === 'setup') { /* persistent form */ }
     else renderAll();
     status.textContent = busy ? '저장 중…' : isGenerating() ? '생성 중에는 저장할 수 없어요' : '';
@@ -738,12 +957,12 @@ function updateBadge() {
 }
 
 async function refreshAll() {
-    if (!active || !chatKey() || !panel || panel.hidden || tab !== 'all') return;
+    if (!active || !chatKey() || !panel || panel.hidden || (tab !== 'all' && tab !== 'vars')) return;
     const token = ++allToken, key = chatKey();
     try {
         const list = await getSortedEntries();
         if (token !== allToken || key !== chatKey()) return;
-        allEntries = list.map(e => ({ world: e.world, uid: e.uid, comment: e.comment, key: e.key, keysecondary: e.keysecondary, constant: e.constant, vectorized: e.vectorized, disable: e.disable }));
+        allEntries = list.map(e => ({ world: e.world, uid: e.uid, comment: e.comment, key: e.key, keysecondary: e.keysecondary, content: e.content, constant: e.constant, vectorized: e.vectorized, disable: e.disable }));
         allChat = key; allError = '';
     } catch (error) {
         if (token !== allToken) return;
@@ -835,7 +1054,7 @@ function buildUI() {
     subtitle = el('p', 'wit-muted'); titles.append(subtitle);
     header.append(titles, button('×', () => setPanelOpen(false), 'wit-close', '닫기'));
     const tabs = el('div', 'wit-tabs');
-    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체'], ['ai', 'AI'], ['setup', '설정']]) {
+    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체'], ['vars', '현재 값'], ['ai', 'AI'], ['setup', '설정']]) {
         const b = button(label, () => { tab = kind; if (kind === 'setup') fillSetup(); render(); refreshAll(); });
         b.dataset.tab = kind; tabs.append(b);
     }
@@ -880,7 +1099,18 @@ function buildSetup() {
     const thinking = el('select', 'wit-thinking');
     thinking.append(new Option('끄기 (추천)', 'min'), new Option('낮게', 'low'), new Option('모델 기본', 'auto'));
     thinking.addEventListener('change', () => { settings().thinking = thinking.value; save(); });
-    const turns = number('chatTurns', 0, 100), every = number('autoEvery', 0, 200), tokens = number('maxTokens', 256, 65536);
+    const turns = number('chatTurns', 0, 100), every = number('autoEvery', 1, 500), tokens = number('maxTokens', 256, 65536);
+    const autoOn = el('input'); autoOn.type = 'checkbox'; autoOn.setAttribute('aria-label', '자동 추적');
+    autoOn.addEventListener('change', async () => {
+        settings().autoOn = autoOn.checked;
+        // Counting starts from the moment it is switched on, not from the past.
+        if (autoOn.checked && chatKey() && relocateBookmark(context().chat || [], chatState().trackAt, chatState().trackSig) === null) {
+            try { await setBookmarkToEnd(chatKey()); } catch (error) { console.warn('[WorldInfo Tracker]', error); }
+        }
+        save();
+    });
+    const tags = el('input'); tags.placeholder = 'Status'; tags.setAttribute('aria-label', '상태창 태그');
+    tags.addEventListener('change', () => { settings().trackTags = tags.value.trim(); save(); });
     const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 5;
     prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
     prompt.addEventListener('input', () => { settings().customPrompt = prompt.value; context().saveSettingsDebounced(); });
@@ -897,11 +1127,14 @@ function buildSetup() {
         row('연결', profile, '', profileHint),
         row('생각', thinking, '', '모델의 생각(추론)에 쓰는 토큰. 끄면 훨씬 싸요. 연결 프로필로 요청할 때만 적용되고, 현재 채팅 API는 SillyTavern 설정을 따라요.'),
         row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수. 요청 비용의 큰 부분이에요.'),
-        row('자동 제안', every, '챗마다', '0이면 꺼짐. 메시지가 이만큼 쌓일 때마다 AI가 알아서 변경안을 제안해요 (스와이프는 안 셈).'),
         row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
+        el('h4', '', '자동 추적'),
+        row('자동 추적', autoOn, '', '켜면 대화가 쌓일 때 AI가 월드인포를 확인해요. 값 변화는 바로 적용하고, 낡은 정보·새 설정은 AI 탭에 제안으로 남겨요. 켠 시점부터 세요.'),
+        row('읽는 주기', every, '턴마다', '캐릭터 응답 N개마다 한 번. 최신 2턴은 확정될 때까지 기다려요. 숨긴 메시지도 읽으니 요약 확장과 상관없이 동작해요.'),
+        row('상태창 태그', tags, '', '메시지마다 반복되는 <Status>…</Status> 같은 블록은 가장 최근 것만 보내서 아껴요. 비우면 끔.'),
         el('h4', '', '추가 지시'),
         prompt,
-        el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요.'),
+        el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요. (이름·개념은 쉽고 구체적으로 짓는 규칙은 기본으로 들어 있어요.)'),
     );
     fillSetup = () => {
         const s = settings(), list = profiles();
@@ -910,6 +1143,7 @@ function buildSetup() {
         if (profile.value !== s.profileId) profile.value = '';
         profileHint.textContent = list.length ? '월드인포 작업에만 다른 모델을 쓰고 싶을 때 연결 프로필을 고르세요.' : '연결 프로필이 없어요. SillyTavern의 연결 관리자(Connection Profiles)에서 만들 수 있어요.';
         thinking.value = s.thinking; turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
+        autoOn.checked = Boolean(s.autoOn); if (document.activeElement !== tags) tags.value = s.trackTags;
         if (document.activeElement !== prompt) prompt.value = s.customPrompt;
     };
     profile.addEventListener('focus', fillSetup);
@@ -982,13 +1216,13 @@ export function onEnable() {
     for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) listen(event_types[name], () => {
         if (result.phase === 'pending') result.phase = 'unknown';
         generation = null; render();
-        if (name === 'GENERATION_ENDED') setTimeout(maybeAutoCheck, 300);
+        if (name === 'GENERATION_ENDED') setTimeout(maybeAutoTrack, 300);
     });
     listen(event_types.CHAT_CHANGED, () => {
         generation = null; result = { chat: '', phase: 'unknown', entries: [] };
         allEntries = []; allChat = ''; allError = ''; allToken++; fileOn.clear();
         if (aiBusy) cancelAi();
-        aiError = ''; aiTargets.clear();
+        aiError = ''; aiNote = ''; trackRetryAt = 0; aiTargets.clear();
         closeDialog(); scheduleRefresh();
     });
     for (const name of ['WORLDINFO_UPDATED', 'WORLDINFO_SETTINGS_UPDATED', 'CHARACTER_EDITED']) listen(event_types[name], scheduleRefresh);
@@ -1007,7 +1241,7 @@ export function onDisable() {
     closeDialog();
     panel?.remove(); launcher?.remove();
     document.getElementById('wit-settings')?.remove(); document.getElementById('wit-menu-item')?.remove();
-    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiError = '';
+    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiError = ''; aiNote = '';
     panel = null; launcher = null; badge = null; generation = null;
     result = { chat: '', phase: 'unknown', entries: [] }; allEntries = []; allChat = '';
 }

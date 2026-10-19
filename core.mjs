@@ -156,24 +156,58 @@ export function countOccurrences(text, needle) {
 }
 
 // ---------- AI ----------
-export const AI_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. The user asks you to add or update entries.
-The user is talking to you, the lorebook maintainer, not to the roleplay: every request is about the lorebook. "Enter", "write", "put in", "update" or "recalculate" X means change the lorebook so it holds X (e.g. recompute a timer from the current in-story date in RECENT CHAT and write the result into the entry).
-
-Reply with JSON only, no other text, in exactly this shape:
-{"proposals":[
- {"action":"update","world":"book name","uid":12,"edits":[{"find":"exact text from the entry","replace":"new text"}],"reason":"why"},
+const FORMAT = `Reply with JSON only, no other text, in exactly this shape:
+{"vars":[{"name":"exact variable name","value":"new value","reason":"why"}],
+ "proposals":[
+ {"action":"update","world":"book name","uid":12,"edits":[{"find":"exact text from the entry","replace":"new text"}],"vars":[{"name":"new variable","value":"its current value"}],"reason":"why"},
  {"action":"create","comment":"title","keys":["keyword"],"constant":false,"content":"entry text","reason":"why"}
-]}
+]}`;
 
-Rules:
-- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid.
-- For an update, use "edits": each "find" is copied character for character from that entry and is replaced everywhere it occurs. Keep finds short but unambiguous. Only for a rewrite of most of the entry, give "content" (the complete new text) instead of "edits". You may add "comment" or "keys" to an update only when they must change.
+const ENTRY_RULES = `- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid.
+- For an update use "edits": each "find" is copied character for character from that entry and is replaced everywhere it occurs. Keep finds short but unambiguous. Only for a rewrite of most of the entry give "content" (the complete new text) instead. Add "comment" or "keys" to an update only when they must change.
 - Prefer updating an existing entry over creating a near-duplicate.
 - Match the language, tone and formatting of the existing entries (headings, bullet style).
 - For something that has not happened yet in the story, state its trigger condition explicitly so it is never treated as current fact.
-- "keys": names and words that appear in chat when the entry matters. Use "constant": true only for rules that must always apply.
-- "reason": one short sentence in the language of the user's request.
-- At most 5 proposals. If nothing should change, return {"proposals":[]}.`;
+- "keys": names and words that appear in chat when the entry matters. "constant": true only for rules that must always apply.
+- "reason": one short sentence in the language of the chat.
+- At most 5 proposals.`;
+
+const VARIABLE_RULES = `Variables: values that change as the story goes on (dates, timers, counts, ranks, affiliations, statuses) can live in chat variables. An entry reads one with {{getvar::name}}; the value is stored per chat, not in the entry.
+- Top-level "vars" sets variables already listed under CURRENT VALUES (exact names only). Never invent a variable there, and never write such a value into entry text.
+- To turn a changing value inside an entry into a variable: in that entry's "update", replace the value in "edits" with {{getvar::name}} and list the variable in that update's "vars" with its current value. Prefer an absolute date over a countdown when the chat shows today's date.`;
+
+// Short on purpose: it is sent with every request. The long form is for the roleplay preset.
+export const WRITING_RULES = `Naming and concepts: prefer concrete, recognizable concepts over abstract or elaborate inventions, and default to familiar genre conventions. Give new elements a clear identity (what it is, what it does, its limits). Name things plainly and descriptively, not with ornate mystical, cosmic or philosophical titles, and do not stack grandiose adjectives or invented terms. Originality comes from distinctive behavior and limits, not obscurity. Do not make ordinary things extraordinary just to add mystery or importance.`;
+
+export const AI_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. The user asks you to add or update entries.
+The user is talking to you, the lorebook maintainer, not to the roleplay: every request is about the lorebook. "Enter", "write", "put in", "update" or "recalculate" X means change the lorebook so it holds X (e.g. recompute a timer from the current in-story date in RECENT CHAT and set the result).
+
+${FORMAT}
+
+Rules:
+${ENTRY_RULES}
+- If nothing should change, return {"vars":[],"proposals":[]}.
+
+${VARIABLE_RULES}
+
+${WRITING_RULES}`;
+
+export const TRACK_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. Read NEW CHAT and report only lasting changes the lorebook should reflect. Nobody is talking to you: answer with the JSON only.
+
+${FORMAT}
+
+What to report (only what NEW CHAT actually establishes, never plans, rumors or guesses):
+1. Value changes: CURRENT VALUES lists chat variables that entries read with {{getvar::name}}. If NEW CHAT shows one has a different value now, put its new value in top-level "vars", in the same format as the old value.
+2. Stale information: an entry in ENTRY DETAILS states something NEW CHAT has made untrue (e.g. "has not happened yet", "does not exist yet", an old affiliation or status). Propose an "update" with "edits" that fix only that wording. If the changing fact is a value, turn it into a variable (see Variables).
+3. New lasting facts: a named character, place, faction, item, creature or rule that matters later and has no entry in ENTRY LIST (check titles and keys first). Propose a "create". Skip scenery, moods, one-off actions and anything already covered.
+Prefer nothing over noise. If nothing qualifies, return {"vars":[],"proposals":[]}.
+
+Rules:
+${ENTRY_RULES}
+
+${VARIABLE_RULES}
+
+${WRITING_RULES}`;
 
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
@@ -202,19 +236,31 @@ export function pickDetails(entries, { request = '', activeKeys = new Set(), tar
     return picked;
 }
 
-export const AUTO_REQUEST = `Automatic check (no user request). Read RECENT CHAT and propose changes only for lasting facts: something in the lorebook that is now outdated (status, ranks, timers, locations, relationships, injuries, possessions, cleared floors...), or an important new lasting fact the lorebook lacks. Ignore momentary actions, moods and dialogue. If nothing needs to change, return {"proposals":[]}. Write "reason" in the main language of the chat.`;
+const entryList = entries => entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).slice(0, 4).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
+const entryBodies = details => details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
+const valueList = vars => Object.entries(vars || {}).map(([k, v]) => `${k} = ${v}`);
+const withExtra = (base, extra) => (String(extra ?? '').trim()
+    ? `${base}\n\nAdditional instructions from the user (follow them unless they break the JSON format):\n${extra.trim()}` : base);
 
-export function buildAiMessages({ request, entries, details, chatLines = [], extra = '' }) {
-    const list = entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
-    const full = details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
+export function buildAiMessages({ request, entries, details, chatLines = [], vars = {}, extra = '' }) {
     const user = [
-        '## ENTRY LIST (world | uid | title | keys | type)', list.join('\n') || '(none)',
-        '## ENTRY DETAILS', full.join('\n\n') || '(none)',
+        '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
+        '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
+        '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',
         '## RECENT CHAT (oldest first)', chatLines.join('\n') || '(none)',
         '## REQUEST', request,
     ].join('\n\n');
-    const system = extra.trim() ? `${AI_SYSTEM_PROMPT}\n\nAdditional instructions from the user (follow them unless they break the JSON format):\n${extra.trim()}` : AI_SYSTEM_PROMPT;
-    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+    return [{ role: 'system', content: withExtra(AI_SYSTEM_PROMPT, extra) }, { role: 'user', content: user }];
+}
+
+export function buildTrackMessages({ lines, vars = {}, entries, details, extra = '', part = null }) {
+    const user = [
+        '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
+        '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
+        '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',
+        `## NEW CHAT (oldest first)${part ? ` - part ${part.i} of ${part.n}` : ''}`, lines.join('\n\n') || '(none)',
+    ].join('\n\n');
+    return [{ role: 'system', content: withExtra(TRACK_SYSTEM_PROMPT, extra) }, { role: 'user', content: user }];
 }
 
 export function recentChatLines(chat, turns, maxChars = 2000) {
@@ -222,8 +268,24 @@ export function recentChatLines(chat, turns, maxChars = 2000) {
         .map(x => `${x.name}: ${clip(String(x.mes ?? '').trim(), maxChars)}`);
 }
 
+// Variable names go inside {{getvar::name}}, so they cannot hold braces, "::" or line breaks.
+export function validVarName(name) {
+    const n = String(name ?? '').trim();
+    return n.length >= 1 && n.length <= 60 && !/[{}\r\n]|::/.test(n) ? n : '';
+}
+export function normalizeVars(list) {
+    const seen = new Set(), out = [];
+    for (const v of Array.isArray(list) ? list : []) {
+        const name = validVarName(v?.name);
+        if (!name || seen.has(name) || v.value === undefined || v.value === null || typeof v.value === 'object') continue;
+        seen.add(name);
+        out.push({ name, value: String(v.value).trim().slice(0, 300), reason: String(v.reason ?? '').trim() });
+    }
+    return out;
+}
+
 /** Reads the model's JSON; tolerates code fences and stray text around it. */
-export function parseProposals(text) {
+export function parseAiResult(text) {
     const raw = String(text ?? '').replace(/```(?:json)?/gi, '');
     const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
     if (start < 0 || end <= start) {
@@ -237,7 +299,7 @@ export function parseProposals(text) {
         .filter(x => x && typeof x.find === 'string' && x.find && typeof x.replace === 'string')
         .map(x => ({ find: x.find, replace: x.replace }));
     const hasContent = p => typeof p.content === 'string' && p.content.trim();
-    return list.filter(p => p && (p.action === 'create' ? hasContent(p) : p.action === 'update' && (hasContent(p) || editsOf(p).length)))
+    const proposals = list.filter(p => p && (p.action === 'create' ? hasContent(p) : p.action === 'update' && (hasContent(p) || editsOf(p).length)))
         .map(p => ({
             action: p.action,
             world: p.action === 'update' ? String(p.world ?? '') : '',
@@ -247,9 +309,12 @@ export function parseProposals(text) {
             constant: Boolean(p.constant),
             content: hasContent(p) ? p.content : null,
             edits: hasContent(p) ? [] : editsOf(p),
+            vars: normalizeVars(p.vars),
             reason: String(p.reason ?? '').trim(),
         }));
+    return { vars: Array.isArray(data) ? [] : normalizeVars(data?.vars), proposals };
 }
+export const parseProposals = text => parseAiResult(text).proposals;
 
 /** Applies find/replace edits; a find that is not in the text makes the whole update fail. */
 export function applyEdits(text, edits) {
@@ -280,4 +345,158 @@ export function lineDiff(before, after) {
     while (i < n) out.push({ type: 'del', text: a[i++] });
     while (j < m) out.push({ type: 'add', text: b[j++] });
     return out;
+}
+
+// ---------- Variables ----------
+const GETVAR = /{{getvar::([^}]+)}}/gi;
+
+/** Which entries read which chat variables: name -> [entry titles]. */
+export function findVarRefs(entries) {
+    const refs = new Map();
+    for (const e of entries) {
+        const title = String(e.comment || '').trim() || `엔트리 ${e.uid}`;
+        for (const m of String(e.content ?? '').matchAll(GETVAR)) {
+            const name = m[1].trim();
+            if (!name) continue;
+            const titles = refs.get(name) ?? [];
+            if (!titles.includes(title)) titles.push(title);
+            refs.set(name, titles);
+        }
+    }
+    return refs;
+}
+
+// ---------- Auto tracking: bookmark, ranges, chunks ----------
+/**
+ * Hidden messages (a summary extension hides old ones) keep their text and only set
+ * is_system, so they stay readable. Real system/narrator lines carry extra.type.
+ */
+export function isReadable(m) {
+    return Boolean(m) && typeof m.mes === 'string' && (!m.is_system || !m.extra?.type);
+}
+const isTurn = m => isReadable(m) && !m.is_user;
+
+export const messageSig = m => (m ? `${m.send_date ?? ''}|${m.name ?? ''}|${m.is_user ? 1 : 0}` : '');
+
+/**
+ * Where the bookmark (number of chat items already read) is now. Deleting or inserting
+ * earlier messages moves it by looking for the message it was placed after.
+ * @returns {number|null} null when there is no bookmark yet.
+ */
+export function relocateBookmark(chat, at, sig) {
+    const list = Array.isArray(chat) ? chat : [];
+    if (!Number.isInteger(at) || at < 0) return null;
+    if (at === 0) return 0;
+    if (at <= list.length && (!sig || messageSig(list[at - 1]) === sig)) return at;
+    if (sig) {
+        const i = list.findIndex(m => messageSig(m) === sig);
+        if (i >= 0) return i + 1;
+    }
+    return Math.min(at, list.length);
+}
+
+/**
+ * The part of the chat to read next. A "turn" is a character message.
+ * Automatic: once `every` turns plus `hold` newest turns have piled up behind the
+ * bookmark, read the first `every`; the newest turns wait so a swipe cannot leak in.
+ * Manual (force): read everything after the bookmark (at most 2x `every` turns, newest);
+ * with no bookmark, the latest `every` turns.
+ */
+export function pickRange(chat, at, { every, hold = 2, force = false } = {}) {
+    const list = Array.isArray(chat) ? chat : [];
+    const from = Number.isInteger(at) && at > 0 ? Math.min(at, list.length) : 0;
+    const turns = [];
+    for (let i = from; i < list.length; i++) if (isTurn(list[i])) turns.push(i);
+    let start = from, end;
+    if (!force) {
+        if (at === null || at === undefined || turns.length < every + hold) return null;
+        end = turns[every - 1] + 1;
+    } else {
+        end = list.length;
+        if (at === null || at === undefined) {
+            const all = [];
+            for (let i = 0; i < list.length; i++) if (isTurn(list[i])) all.push(i);
+            if (!all.length) return null;
+            start = all[Math.max(0, all.length - every)];
+        } else {
+            if (!turns.length) return null;
+            const cap = every * 2;
+            if (turns.length > cap) start = turns[turns.length - cap];
+        }
+        // Start at the user message that prompted the first turn, if there is one.
+        for (let j = start - 1; j >= 0; j--) {
+            if (!isReadable(list[j])) continue;
+            if (list[j].is_user && j >= from) start = j;
+            break;
+        }
+    }
+    const messages = [];
+    for (let i = start; i < end; i++) if (isReadable(list[i])) messages.push({ index: i, name: list[i].name ?? '', is_user: Boolean(list[i].is_user), mes: list[i].mes });
+    return { start, end, messages, turns: messages.filter(m => !m.is_user).length };
+}
+
+/** For the status line: character turns piled up behind the bookmark. */
+export function pendingTurns(chat, at) {
+    const list = Array.isArray(chat) ? chat : [];
+    let n = 0;
+    for (let i = Number.isInteger(at) && at > 0 ? Math.min(at, list.length) : 0; i < list.length; i++) if (isTurn(list[i])) n++;
+    return n;
+}
+
+export const formatLines = (messages, maxChars = 4000) => messages.map(m => `${m.name}: ${clip(String(m.mes).trim(), maxChars)}`);
+
+export function parseTagList(text) {
+    return [...new Set(String(text ?? '').split(/[,\s]+/).map(x => x.replace(/^<|>$/g, '').trim()).filter(x => /^[\w-]{1,30}$/.test(x)))];
+}
+
+/**
+ * Status blocks like <Status>…</Status> repeat in every message. Only the newest one is
+ * kept (it holds the current state); older copies are cut to save tokens.
+ */
+export function thinTagBlocks(lines, tags) {
+    const out = [...lines];
+    for (const tag of tags) {
+        const re = () => new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'gi');
+        let last = -1;
+        out.forEach((line, i) => { if (re().test(line)) last = i; });
+        if (last < 0) continue;
+        out.forEach((line, i) => {
+            if (i > last) return;
+            let kept = 0;
+            const total = (line.match(re()) || []).length;
+            out[i] = line.replace(re(), block => (i === last && ++kept === total ? block : '')).replace(/\n{3,}/g, '\n\n');
+        });
+    }
+    return out;
+}
+
+/** Splits lines into parts of at most maxChars (a single long line stays whole). */
+export function splitParts(lines, maxChars) {
+    const parts = [];
+    let cur = [], size = 0;
+    for (const line of lines) {
+        if (cur.length && size + line.length > maxChars) { parts.push(cur); cur = []; size = 0; }
+        cur.push(line); size += line.length;
+    }
+    if (cur.length) parts.push(cur);
+    return parts;
+}
+
+/** Entry bodies for the tracker: those named in the new chat, then ON constant entries. */
+export function pickTrackDetails(entries, text, { budget = 16000, globals = { caseSensitive: false, matchWholeWords: false } } = {}) {
+    const haystack = String(text ?? '');
+    const named = e => {
+        const title = String(e.comment || '').trim();
+        if (title && haystack.toLowerCase().includes(title.toLowerCase())) return true;
+        return keyList(e.key).some(k => keyMatches(haystack, k, e, globals));
+    };
+    const ranked = [...entries.filter(named), ...entries.filter(e => e.constant && !e.disable)];
+    const picked = [], seen = new Set();
+    let used = 0;
+    for (const e of ranked) {
+        const k = entryKey(e.world, e.uid), size = String(e.content || '').length;
+        if (seen.has(k) || used + size > budget) continue;
+        seen.add(k); picked.push(e); used += size;
+    }
+    return picked;
 }

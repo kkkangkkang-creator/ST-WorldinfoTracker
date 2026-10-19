@@ -46,13 +46,14 @@ const page0 = `<!doctype html><html><head><meta charset="utf-8"><link rel="style
 window.books = { AU: { entries: {
     0: { uid: 0, comment: '성좌 헌터물', key: [], content: 'World...', constant: true, disable: true, order: 100 },
     2: { uid: 2, comment: '헌터물 기본 설정 보강', key: [], content: 'Around two weeks remain. roughly two weeks remaining.', constant: true, disable: true, order: 101 },
-    5: { uid: 5, comment: '탑 내부', key: ['탑', 'tower'], keysecondary: ['2층'], content: 'Inside the tower', constant: false, disable: false },
+    5: { uid: 5, comment: '탑 내부', key: ['탑', 'tower'], keysecondary: ['2층'], content: 'Inside the tower. Break: {{getvar::2층_Break}}', constant: false, disable: false },
 } } };
 const chats = { A: {}, B: {} }, store = new Map();
 const extensionSettings = { disabledExtensions: [], connectionManager: { profiles: [{ id: 'p1', name: 'Flash', api: 'openai' }, { id: 'p2', name: 'Novel', api: 'novel' }] } };
 window.extensionSettings = extensionSettings;
 window.currentChat = 'A';
-window.chat = [{ name: 'User', mes: '탑 2층 공략은 언제야?' }, { name: 'Lena', mes: '아직 몰라.' }];
+window.chat = [{ name: 'User', mes: '탑 2층 공략은 언제야?', send_date: 's0' }, { name: 'Lena', mes: '아직 몰라.', send_date: 's1' }];
+window.addTurns = (n, tag) => { for (let i = 0; i < n; i++) { const k = window.chat.length; window.chat.push({ name: 'User', is_user: true, mes: tag + ' user ' + i, send_date: 'u' + k }, { name: 'Lena', mes: '<Status>[DATE]' + tag + i + '[/DATE]</Status> ' + tag + ' lena ' + i, send_date: 'l' + k }); } };
 window.SillyTavern = {
     libs: { localforage: { getItem: async k => store.get(k) ?? null, setItem: async (k, v) => { store.set(k, structuredClone(v)); } } },
     getContext: () => ({
@@ -178,11 +179,11 @@ window.chats = chats; window.store = store;
     await page.click('.wit-tabs button[data-tab=all]');
     await page.click('.wit-row >> text=탑 내부');
     await page.waitForSelector('.wit-dialog');
-    await page.fill('.wit-dialog textarea.wit-content', 'Inside the tower (edited)');
+    await page.fill('.wit-dialog textarea.wit-content', 'Inside the tower. Break: {{getvar::2층_Break}} (edited)');
     await page.click('.wit-dialog button >> text=공용 책에 저장');
     await page.waitForSelector('.wit-dialog', { state: 'detached' });
     state = await page.evaluate(() => ({ books: window.books, backups: [...window.store.keys()] }));
-    assert.equal(state.books.AU.entries[5].content, 'Inside the tower (edited)');
+    assert.equal(state.books.AU.entries[5].content, 'Inside the tower. Break: {{getvar::2층_Break}} (edited)');
     assert.equal(state.backups.length, 1);
 
     // 8. Chat-only ON/OFF: chat B turns "탑 내부" off; chat A keeps it on; toggling back clears the override.
@@ -209,7 +210,7 @@ window.chats = chats; window.store = store;
     await page.click('.wit-row >> text=탑 내부');
     await page.evaluate(() => { window.busy = true; });
     await page.click('.wit-dialog button >> text=공용 책에 저장');
-    assert.equal(await page.evaluate(() => window.books.AU.entries[5].content), 'Inside the tower (edited)');
+    assert.equal(await page.evaluate(() => window.books.AU.entries[5].content), 'Inside the tower. Break: {{getvar::2층_Break}} (edited)');
     await page.evaluate(() => { window.busy = false; });
 
     // 10. AI: request -> proposals -> apply. Chat B has no chat book yet.
@@ -264,12 +265,15 @@ window.chats = chats; window.store = store;
     assert.deepEqual(await page.$$eval('.wit-setup select.wit-profile option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
     await page.selectOption('.wit-setup select.wit-profile', 'p1');
     await page.fill('.wit-setup-prompt', '한국어로 써줘');
+    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.autoOn, s.autoEvery, s.trackTags]; }), [false, 30, 'Status'], 'auto tracking is off by default, every 30 turns');
     const numbers = await page.$$('.wit-setup input[type=number]');
-    await numbers[1].fill('2'); await numbers[1].press('Tab');
-    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoEvery]; }), ['p1', '한국어로 써줘', 2]);
+    await numbers[2].fill('3'); await numbers[2].press('Tab');
+    await page.check('.wit-setup input[type=checkbox]');
+    await page.waitForFunction(() => window.chats.B.worldinfo_tracker?.trackAt === 2);
+    assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoOn, s.autoEvery]; }), ['p1', '한국어로 써줘', true, 3]);
     if (shots) await page.screenshot({ path: path.join(shots, '8-setup.png') });
     await page.click('.wit-tabs button[data-tab=ai]');
-    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 대화 10턴 · 2챗마다 자동/);
+    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 대화 10턴/);
     await page.evaluate(() => { window.aiReply = '{"proposals":[]}'; });
     await page.fill('.wit-ask-input', '확인');
     await page.click('.wit-ask-row button >> text=보내기');
@@ -295,19 +299,75 @@ window.chats = chats; window.store = store;
     await page.click('.wit-target >> text=탑 내부 ×');
     await page.waitForSelector('.wit-target-auto');
 
-    // 12. Automatic proposals every 2 chat messages; swipes (no new message) don't count.
-    await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({ proposals: [{ action: 'create', comment: '자동 엔트리', keys: ['x'], content: 'auto' }] }); });
-    const endGeneration = () => page.evaluate(async () => { await window.eventSource.emit('GENERATION_ENDED'); await new Promise(r => setTimeout(r, 400)); });
-    await endGeneration(); // first sight sets the starting point
-    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.autoAt), 2);
-    await page.evaluate(() => window.chat.push({ name: 'User', mes: '1' }));
+    // 12. 현재 값 tab: an entry reads a variable nobody set yet.
+    await page.click('.wit-tabs button[data-tab=vars]');
+    await page.waitForSelector('.wit-var-missing');
+    assert.match(await page.textContent('.wit-var-missing'), /2층_Break[\s\S]*쓰는 엔트리: 탑 내부/);
+    await page.fill('.wit-var-missing input', '2025/04/22'); await page.press('.wit-var-missing input', 'Enter');
+    await page.waitForFunction(() => window.chats.B.variables?.['2층_Break'] === '2025/04/22');
+    await page.waitForSelector('.wit-var-missing', { state: 'detached' });
+    assert.match(await page.textContent('.wit-var'), /쓰는 엔트리: 탑 내부/);
+    await page.fill('.wit-var-add input >> nth=0', '클리어_층'); await page.fill('.wit-var-add input >> nth=1', '1');
+    await page.click('.wit-var-add button');
+    await page.waitForFunction(() => window.chats.B.variables?.['클리어_층'] === '1');
+    // edit, then undo from the log; a bad name is refused
+    await page.fill('.wit-var:has-text("클리어_층") input', '2'); await page.press('.wit-var:has-text("클리어_층") input', 'Enter');
+    await page.waitForFunction(() => window.chats.B.variables['클리어_층'] === '2');
+    await page.click('.wit-var:has-text("클리어_층") button >> text=되돌리기');
+    await page.waitForFunction(() => window.chats.B.variables['클리어_층'] === '1');
+    await page.fill('.wit-var-add input >> nth=0', 'a}}b'); await page.click('.wit-var-add button');
+    assert.equal(await page.evaluate(() => Object.keys(window.chats.B.variables).join()), '2층_Break,클리어_층');
+    if (shots) await page.screenshot({ path: path.join(shots, '9-vars.png') });
+    await page.click('.wit-var:has-text("클리어_층") button >> text=✕');
+    await page.waitForFunction(() => !('클리어_층' in window.chats.B.variables));
+
+    // 13. Auto tracking: bookmark at 2 (set when switched on), every 3 turns, 2 newest wait.
+    await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({
+        vars: [{ name: '2층_Break', value: '2025/05/01', reason: '날짜가 바뀜' }, { name: '모르는_변수', value: 'x' }],
+        proposals: [{ action: 'create', comment: '자동 엔트리', keys: ['x'], content: 'auto' }] }); });
+    const endGeneration = () => page.evaluate(async () => { await window.eventSource.emit('GENERATION_ENDED'); await new Promise(r => setTimeout(r, 500)); });
+    await page.evaluate(() => { window.addTurns(3, 'A'); window.chat[2].is_system = true; window.chat[3].is_system = true; }); // the first pair is hidden, like a summary extension does
     await endGeneration();
-    assert.equal(await page.evaluate(() => window.profileCall), null);
-    await page.evaluate(() => window.chat.push({ name: 'Lena', mes: '2' }));
+    assert.equal(await page.evaluate(() => window.profileCall), null, '3 turns < 3 + 2 held');
+    await page.evaluate(() => window.addTurns(2, 'B'));
     await endGeneration();
+    await page.waitForFunction(() => window.profileCall === 'p1');
+    const track = await page.evaluate(() => window.aiPrompt);
+    assert.match(track[0].content, /Read NEW CHAT and report only lasting changes/);
+    const chatPart = track[1].content.split('## NEW CHAT (oldest first)')[1];
+    assert.ok(chatPart.includes('A user 0') && chatPart.includes('A lena 2'), 'hidden messages are read');
+    assert.ok(!chatPart.includes('B lena'), 'the newest turns wait');
+    assert.equal((chatPart.match(/<Status>/g) || []).length, 1, 'only the newest Status block is kept');
+    assert.ok(chatPart.includes('[DATE]A2[/DATE]'));
+    assert.match(track[1].content, /## CURRENT VALUES \(variable = value\)\n\n2층_Break = 2025\/04\/22/);
+    await page.click('.wit-tabs button[data-tab=ai]');
     await page.waitForSelector('.wit-card .wit-tag >> text=자동');
-    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## REQUEST\n\nAutomatic check/);
-    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.autoAt), 4);
+    let st = await page.evaluate(() => ({ vars: window.chats.B.variables, meta: window.chats.B.worldinfo_tracker }));
+    assert.equal(st.vars['2층_Break'], '2025/05/01', 'value changes are applied right away');
+    assert.ok(!('모르는_변수' in st.vars), 'unknown variables are ignored');
+    assert.equal(st.meta.varLog[0].source, 'auto');
+    assert.equal(st.meta.trackAt, 8, 'bookmark right after the 3rd turn');
+    assert.equal(st.meta.trackLast.turns, 3);
+    assert.equal(st.meta.trackLast.vars, 1);
+    await page.click('.wit-tabs button[data-tab=vars]');
+    assert.match(await page.textContent('.wit-var:has-text("2층_Break")'), /AI .*2025\/04\/22 → 2025\/05\/01/);
+    await page.click('.wit-tabs button[data-tab=ai]');
+    assert.match(await page.textContent('.wit-track'), /자동 추적 · 3턴마다 · 2턴 쌓임 · 3턴 뒤 실행[\s\S]*마지막 확인 방금 · 3턴 읽음 · 값 1개 · 제안 1개/);
+    if (shots) await page.screenshot({ path: path.join(shots, '10-track.png') });
+
+    // 14. "지금 확인" reads whatever is behind the bookmark, including the held turns.
+    await page.evaluate(() => { window.profileCall = null; window.aiReply = '{"vars":[],"proposals":[]}'; });
+    await page.click('.wit-track button >> text=지금 확인');
+    await page.waitForFunction(() => window.profileCall === 'p1');
+    const manual = await page.evaluate(() => window.aiPrompt[1].content.split('## NEW CHAT (oldest first)')[1]);
+    assert.ok(manual.includes('B lena 1') && !manual.includes('A lena'), 'only what is new');
+    await page.waitForFunction(() => window.chats.B.worldinfo_tracker.trackLast.manual === true);
+    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.trackAt), await page.evaluate(() => window.chat.length));
+    // nothing new behind the bookmark: no request goes out
+    await page.evaluate(() => { window.profileCall = null; });
+    await page.click('.wit-track button >> text=지금 확인');
+    await page.waitForTimeout(600);
+    assert.equal(await page.evaluate(() => window.profileCall), null);
 
     // Phone width.
     await page.setViewportSize({ width: 390, height: 760 });

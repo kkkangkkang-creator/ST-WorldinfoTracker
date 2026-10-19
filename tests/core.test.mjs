@@ -4,6 +4,8 @@ import {
     keyMatches, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
     pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits,
+    parseAiResult, validVarName, findVarRefs, isReadable, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines,
+    parseTagList, thinTagBlocks, splitParts, pickTrackDetails, buildTrackMessages, AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT, WRITING_RULES,
 } from '../core.mjs';
 
 const globals = { depth: 2, caseSensitive: false, matchWholeWords: false };
@@ -143,7 +145,7 @@ test('AI replies are parsed leniently and validated', () => {
         '{"action":"update","world":"AU","uid":2,"content":"9 days"},{"action":"delete","content":"x"},{"action":"create","content":"  "}]}\n```';
     const list = parseProposals(reply);
     assert.equal(list.length, 2);
-    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', edits: [], reason: '요청' });
+    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', edits: [], vars: [], reason: '요청' });
     assert.equal(list[1].world, 'AU');
     assert.equal(list[1].uid, 2);
     assert.throws(() => parseProposals('no json here'), /JSON을 찾지/);
@@ -170,4 +172,131 @@ test('updates as find/replace edits', () => {
         { content: 'Around 12 days remain. roughly 12 days remaining.', missing: [] });
     assert.deepEqual(applyEdits('abc', [{ find: 'zzz', replace: 'y' }]).missing, ['zzz']);
     assert.deepEqual(parseProposals('{"proposals":[{"action":"update","world":"AU","uid":2,"edits":[]}]}'), [], 'an update with nothing to do is dropped');
+});
+
+// ---------- 1단계: variables, bookmark, tracker ----------
+const mk = (i, over = {}) => ({ name: i % 2 ? 'User' : 'Lena', is_user: Boolean(i % 2), mes: `m${i}`, send_date: `d${i}`, ...over });
+// 0 = Lena (turn), 1 = User, 2 = Lena ...
+const chatOf = n => Array.from({ length: n }, (_, i) => mk(i));
+
+test('variable names and AI results with vars', () => {
+    assert.equal(validVarName('  2층_Break '), '2층_Break');
+    assert.equal(validVarName('a}}b'), '');
+    assert.equal(validVarName('x::y'), '');
+    assert.equal(validVarName(''), '');
+    const r = parseAiResult('{"vars":[{"name":"클리어_층","value":2,"reason":"r"},{"name":"bad}}","value":"x"},{"name":"클리어_층","value":"3"},{"name":"o","value":{"a":1}}],' +
+        '"proposals":[{"action":"update","world":"AU","uid":2,"edits":[{"find":"two weeks","replace":"{{getvar::2층_Break}}"}],"vars":[{"name":"2층_Break","value":"2025/04/22"}]}]}');
+    assert.deepEqual(r.vars, [{ name: '클리어_층', value: '2', reason: 'r' }]);
+    assert.deepEqual(r.proposals[0].vars, [{ name: '2층_Break', value: '2025/04/22', reason: '' }]);
+    assert.deepEqual(parseAiResult('{"proposals":[]}').vars, []);
+});
+
+test('entries that read chat variables are found', () => {
+    const refs = findVarRefs([
+        { uid: 1, comment: 'Towers', content: 'Floor {{getvar::클리어_층}} done. Break {{getvar::2층_Break}} / {{getvar::클리어_층}}' },
+        { uid: 2, comment: '', content: '{{getvar:: 2층_Break }} and {{getvar::}}' },
+        { uid: 3, comment: 'None', content: 'no macros' },
+    ]);
+    assert.deepEqual([...refs.keys()], ['클리어_층', '2층_Break']);
+    assert.deepEqual(refs.get('클리어_층'), ['Towers']);
+    assert.deepEqual(refs.get('2층_Break'), ['Towers', '엔트리 2']);
+});
+
+test('hidden messages stay readable, system lines do not', () => {
+    assert.ok(isReadable({ mes: 'x', is_system: true }), 'hidden by /hide');
+    assert.ok(!isReadable({ mes: 'x', is_system: true, extra: { type: 'narrator' } }));
+    assert.ok(isReadable({ mes: 'x' }));
+    assert.ok(!isReadable({ mes: 5 }));
+});
+
+test('automatic range: waits for every + hold turns, reads the first `every`', () => {
+    const chat = chatOf(10); // turns at 0,2,4,6,8
+    assert.equal(pickRange(chat, 0, { every: 4, hold: 2 }), null, '5 turns < 4 + 2');
+    assert.equal(pickRange(chat, null, { every: 2, hold: 2 }), null, 'no bookmark yet');
+    const r = pickRange(chat, 0, { every: 3, hold: 2 });
+    assert.equal(r.end, 5, 'ends right after the 3rd turn (index 4)');
+    assert.equal(r.turns, 3);
+    assert.deepEqual(r.messages.map(m => m.mes), ['m0', 'm1', 'm2', 'm3', 'm4']);
+    // continuing from the bookmark never repeats earlier lines
+    assert.equal(pickRange(chat, 5, { every: 2, hold: 2 }), null, 'turns 6, 8 only');
+    const more = chatOf(16);
+    assert.deepEqual(pickRange(more, 5, { every: 2, hold: 2 }).messages.map(m => m.mes), ['m5', 'm6', 'm7', 'm8']);
+});
+
+test('hidden messages are read; narrator lines are not', () => {
+    const chat = chatOf(8).map((m, i) => (i < 4 ? { ...m, is_system: true } : m));
+    chat.splice(2, 0, { name: 'Narrator', mes: 'sys', is_system: true, extra: { type: 'narrator' }, send_date: 'n' });
+    const r = pickRange(chat, 0, { every: 2, hold: 1 });
+    assert.deepEqual(r.messages.map(m => m.mes), ['m0', 'm1', 'm2'], 'hidden m0..m2 read, narrator skipped, ends after the 2nd turn');
+});
+
+test('manual range: latest turns without a bookmark, capped behind one', () => {
+    const chat = chatOf(20); // turns at even indexes
+    const fresh = pickRange(chat, null, { every: 3, force: true });
+    assert.equal(fresh.turns, 3);
+    assert.equal(fresh.messages[0].mes, 'm13', 'starts at the user message before the 3rd-last turn');
+    assert.equal(fresh.end, 20);
+    assert.equal(pickRange(chat, 20, { every: 3, force: true }), null, 'nothing new');
+    const behind = pickRange(chat, 2, { every: 2, force: true });
+    assert.equal(behind.turns, 4, 'capped to 2 x every, newest');
+    assert.equal(behind.messages.at(-1).mes, 'm19');
+    assert.equal(pendingTurns(chat, 10), 5);
+});
+
+test('the bookmark follows deleted and inserted messages', () => {
+    const chat = chatOf(10);
+    const sig = messageSig(chat[5]);
+    assert.equal(relocateBookmark(chat, 6, sig), 6, 'unchanged');
+    const shifted = chat.slice(2); // two earlier messages deleted
+    assert.equal(relocateBookmark(shifted, 6, sig), 4, 'found by its signature');
+    assert.equal(relocateBookmark(chat.slice(0, 3), 6, sig), 3, 'message gone: clamped to the end');
+    assert.equal(relocateBookmark(chat, null, ''), null);
+    assert.equal(relocateBookmark(chat, 0, ''), 0);
+});
+
+test('tag blocks keep only the newest, text is clipped and split', () => {
+    const lines = [
+        'Lena: <Status>[DATE]4/10[/DATE]</Status>\nhello',
+        'User: hi',
+        'Lena: <Status>[DATE]4/12[/DATE]</Status>\nlater',
+    ];
+    const thin = thinTagBlocks(lines, ['Status']);
+    assert.ok(!thin[0].includes('Status'));
+    assert.equal(thin[0], 'Lena: \nhello');
+    assert.ok(thin[2].includes('4/12'));
+    assert.deepEqual(thinTagBlocks(lines, []), lines);
+    assert.deepEqual(parseTagList('Status, <Info> bad!tag'), ['Status', 'Info']);
+    assert.equal(formatLines([{ name: 'A', mes: ' x'.repeat(10) }], 6)[0], 'A: x x x …');
+    assert.deepEqual(splitParts(['aaa', 'bbb', 'ccc'], 7).map(p => p.length), [2, 1]);
+    assert.deepEqual(splitParts(['a'.repeat(20)], 5), [['a'.repeat(20)]]);
+    assert.deepEqual(splitParts([], 5), []);
+});
+
+test('tracker details: entries named in the new chat, then ON constants', () => {
+    const entries = [
+        { world: 'AU', uid: 0, comment: '성좌 헌터물', key: [], constant: true, disable: true, content: 'x'.repeat(10) },
+        { world: 'AU', uid: 1, comment: '소렌', key: ['Soren'], constant: false, content: 'y'.repeat(10) },
+        { world: 'AU', uid: 2, comment: '기본 설정', key: [], constant: true, content: 'z'.repeat(10) },
+        { world: 'AU', uid: 3, comment: '큰 설정', key: [], constant: true, content: 'w'.repeat(500) },
+    ];
+    assert.deepEqual(pickTrackDetails(entries, 'Soren이 왔다', { budget: 100 }).map(e => e.uid), [1, 2]);
+    assert.deepEqual(pickTrackDetails(entries, '아무 일 없음', { budget: 600 }).map(e => e.uid), [2, 3]);
+});
+
+test('tracker messages and prompts', () => {
+    const [system, user] = buildTrackMessages({
+        lines: ['Lena: hi'], vars: { 클리어_층: '1' }, extra: '한국어로',
+        entries: [{ world: 'AU', uid: 1, comment: '소렌', key: ['a', 'b', 'c', 'd', 'e'], constant: false }],
+        details: [], part: { i: 2, n: 3 },
+    });
+    assert.match(system.content, /report only lasting changes/);
+    assert.match(system.content, /Additional instructions[^\n]*\n한국어로$/);
+    assert.match(user.content, /## CURRENT VALUES \(variable = value\)\n\n클리어_층 = 1/);
+    assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d \| keyword/);
+    assert.match(user.content, /## NEW CHAT \(oldest first\) - part 2 of 3\n\nLena: hi$/);
+    for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) {
+        assert.ok(prompt.includes(WRITING_RULES));
+        assert.match(prompt, /\{\{getvar::name\}\}/);
+    }
+    assert.ok(WRITING_RULES.length < 800, 'the naming rule stays short: it is sent with every request');
 });
