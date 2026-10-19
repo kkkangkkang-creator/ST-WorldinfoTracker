@@ -306,8 +306,8 @@ window.chats = chats; window.store = store;
     assert.match(await page.textContent('.wit-var-missing'), /2층_Break[\s\S]*쓰는 엔트리: 탑 내부/);
     // the chat also holds preset variables: they are listed by name only, never as editable rows
     assert.equal(await page.$$eval('.wit-var input', i => i.length), 1, 'only the managed (missing) variable has an input');
-    assert.match(await page.textContent('.wit-var-other summary'), /다른 변수 3개/);
-    assert.ok(!(await page.textContent('.wit-body')).includes('CTRLCTRL'), 'preset values are not shown');
+    const shown = await page.textContent('.wit-body');
+    assert.ok(!shown.includes('CTRLCTRL') && !/formatCtrlBot|harukiCoreStatement|designStoryPrompt/.test(shown), 'preset variables are not shown at all');
     await page.fill('.wit-var-missing input', '2025/04/22'); await page.press('.wit-var-missing input', 'Enter');
     await page.waitForFunction(() => window.chats.B.variables?.['2층_Break'] === '2025/04/22');
     await page.waitForSelector('.wit-var-missing', { state: 'detached' });
@@ -325,14 +325,6 @@ window.chats = chats; window.store = store;
     if (shots) await page.screenshot({ path: path.join(shots, '9-vars.png') });
     await page.click('.wit-var:has-text("클리어_층") button >> text=✕');
     await page.waitForFunction(() => !('클리어_층' in window.chats.B.variables));
-    // a preset variable can be handed over on purpose
-    await page.click('.wit-var-other summary');
-    await page.click('.wit-var-other-row:has-text("designStoryPrompt") button');
-    await page.waitForSelector('.wit-var:has-text("designStoryPrompt") input');
-    assert.equal(await page.inputValue('.wit-var:has-text("designStoryPrompt") input'), '继续');
-    assert.match(await page.textContent('.wit-var-other summary'), /다른 변수 2개/);
-    await page.click('.wit-var:has-text("designStoryPrompt") button >> text=✕');
-    await page.waitForFunction(() => !('designStoryPrompt' in window.chats.B.variables));
 
     // 13. Auto tracking: bookmark at 2 (set when switched on), every 3 turns, 2 newest wait.
     await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({

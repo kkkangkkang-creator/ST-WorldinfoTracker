@@ -827,14 +827,10 @@ function varRow(name, value, titles, log, missing = false) {
     }
     return row;
 }
-async function trackName(name) {
-    try { await writeChatState(st => { if (!st.tracked.includes(name)) st.tracked.push(name); }, chatKey()); } catch (error) { notify(error.message, true); }
-    render(true);
-}
 function renderVars() {
     const all = chatVars(), loaded = allChat === chatKey(), refs = loaded ? findVarRefs(allEntries) : new Map(), st = chatState();
     const tracked = new Set([...st.tracked, ...refs.keys()]);
-    body.append(el('p', 'wit-note', '이 확장이 관리하는 값이에요 (엔트리가 {{getvar::이름}}으로 읽는 것 + 여기서 추가한 것). 고치면 다음 응답부터 적용돼요.'));
+    body.append(el('p', 'wit-note', '엔트리가 {{getvar::이름}}으로 읽는 값과 여기서 추가한 값이에요 · 고치면 다음 응답부터 적용돼요'));
     const names = [...tracked].filter(n => Object.hasOwn(all, n));
     for (const name of names) body.append(varRow(name, all[name], refs.get(name), st.varLog.find(l => l.name === name)));
     if (!names.length) body.append(el('p', 'wit-empty', '아직 관리하는 값이 없어요.\n아래에서 추가하거나, 엔트리 수정 창의 "값 뽑기"로 AI에게 맡길 수 있어요.'));
@@ -844,18 +840,6 @@ function renderVars() {
         warn.append(el('h4', '', '⚠ 값이 없는 변수 · 엔트리에서 쓰고 있어요'));
         for (const name of missing) warn.append(varRow(name, '', refs.get(name), null, true));
         body.append(warn);
-    }
-    // Presets and other tools keep many variables in the same chat. Names only, never edited or sent to the AI.
-    const others = loaded ? Object.keys(all).filter(n => !tracked.has(n)) : [];
-    if (others.length) {
-        const box = el('details', 'wit-var-other');
-        box.append(el('summary', '', `다른 변수 ${others.length}개 · 프리셋 등이 쓰는 값이라 건드리지 않아요`));
-        for (const name of others) {
-            const row = el('div', 'wit-var-other-row');
-            row.append(el('span', '', name), button('관리에 추가', () => trackName(name), 'wit-link', `${name}을(를) 이 확장이 관리하게 해요`));
-            box.append(row);
-        }
-        body.append(box);
     }
     const add = el('form', 'wit-var-add');
     const name = el('input'); name.placeholder = '이름 (예: 2층_Break)'; name.setAttribute('aria-label', '새 변수 이름');
