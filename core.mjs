@@ -110,14 +110,23 @@ export function chatBookName(chatId, exists) {
     return name;
 }
 
-// Keys are comma-separated; once any key holds a comma (regex), one key per line.
+// Keys are comma-separated; a /regex/ key may itself contain commas.
 export function formatKeys(keys) {
-    const list = keyList(keys);
-    return list.some(x => x.includes(',')) ? list.join('\n') : list.join(', ');
+    return keyList(keys).join(', ');
 }
 export function parseKeys(text) {
-    const value = String(text ?? '');
-    return value.split(value.includes('\n') ? /\n/ : /,/).map(x => x.trim()).filter(Boolean);
+    const keys = [];
+    let pending = '';
+    for (const piece of String(text ?? '').split(/[,\n]/)) {
+        pending = pending ? `${pending},${piece}` : piece;
+        const trimmed = pending.trim();
+        // Keep joining while an opened "/..." has not closed into a valid regex yet.
+        if (trimmed.startsWith('/') && !parseKeyRegex(trimmed)) continue;
+        if (trimmed) keys.push(trimmed);
+        pending = '';
+    }
+    if (pending.trim()) keys.push(...pending.split(',').map(x => x.trim()).filter(Boolean));
+    return keys;
 }
 
 export function countOccurrences(text, needle) {

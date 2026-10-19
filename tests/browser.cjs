@@ -138,7 +138,7 @@ window.chats = chats; window.store = store;
     // 6. Add a new chat-only entry.
     await page.click('.wit-toolbar button >> text=＋ 새 엔트리');
     await page.fill('.wit-dialog .wit-field >> nth=0 >> input', '균열');
-    await page.fill('.wit-dialog .wit-field >> nth=1 >> textarea', '균열, rift');
+    await page.fill('.wit-dialog .wit-field >> nth=1 >> input', '균열, rift');
     await page.fill('.wit-dialog textarea.wit-content', '## Rifts (not yet occurred)');
     await page.click('.wit-modes button[data-mode=constant]');
     await page.fill('.wit-settings-row input >> nth=0', '50');

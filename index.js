@@ -254,8 +254,8 @@ async function openEditor(item) {
     main.append(where);
 
     const title = el('input'); title.value = raw?.comment ?? '';
-    const keys = el('textarea'); keys.rows = 1; keys.value = formatKeys(raw?.key); keys.placeholder = '쉼표로 구분';
-    const keys2 = el('textarea'); keys2.rows = 1; keys2.value = formatKeys(raw?.keysecondary);
+    const keys = el('input'); keys.value = formatKeys(raw?.key); keys.placeholder = '쉼표로 구분';
+    const keys2 = el('input'); keys2.value = formatKeys(raw?.keysecondary);
     main.append(field('제목', title), field('키워드', keys), field('보조', keys2));
 
     // Activation mode, order and probability on one row.

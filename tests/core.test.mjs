@@ -81,8 +81,10 @@ test('chat book names are file-safe and unique', () => {
 test('keys round-trip through the text field', () => {
     assert.equal(formatKeys(['균열', 'rift']), '균열, rift');
     assert.deepEqual(parseKeys('균열, rift ,'), ['균열', 'rift']);
-    const regexKeys = ['/a,b/', 'c'];
+    const regexKeys = ['/a,b/i', 'c'];
     assert.deepEqual(parseKeys(formatKeys(regexKeys)), regexKeys);
+    assert.deepEqual(parseKeys('/half, open'), ['/half', 'open']);
+    assert.deepEqual(parseKeys('a\nb'), ['a', 'b']);
     assert.equal(countOccurrences('two weeks ... two weeks', 'two weeks'), 2);
     assert.equal(entryKey('AU', 2), entryKey('AU', '2'));
 });
