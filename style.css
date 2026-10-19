@@ -141,3 +141,7 @@ dialog.wit-dialog .wit-settings-row input { width:68px; flex:none; text-align:ri
 .wit-var-add { display:flex; gap:6px; margin-top:12px; }
 .wit-var-add button { flex:none; }
 .wit-setup-group input[type=checkbox],.wit-panel .wit-setup input[type=checkbox] { flex:0 0 18px; width:18px; height:18px; padding:0; margin:0; accent-color:var(--wit-accent); }
+.wit-var-other { margin-top:12px; font-size:12px; color:var(--wit-muted); }
+.wit-var-other summary { cursor:pointer; padding:4px 0; }
+.wit-var-other-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 2px; border-bottom:1px solid var(--wit-line); }
+.wit-var-other-row span { min-width:0; overflow-wrap:anywhere; font-size:12px; }

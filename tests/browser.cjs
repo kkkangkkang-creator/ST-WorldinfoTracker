@@ -48,7 +48,8 @@ window.books = { AU: { entries: {
     2: { uid: 2, comment: '헌터물 기본 설정 보강', key: [], content: 'Around two weeks remain. roughly two weeks remaining.', constant: true, disable: true, order: 101 },
     5: { uid: 5, comment: '탑 내부', key: ['탑', 'tower'], keysecondary: ['2층'], content: 'Inside the tower. Break: {{getvar::2층_Break}}', constant: false, disable: false },
 } } };
-const chats = { A: {}, B: {} }, store = new Map();
+const presetVars = { formatCtrlBot: 'CTRL'.repeat(100), harukiCoreStatement: 'statement', designStoryPrompt: '继续' };
+const chats = { A: {}, B: { variables: { ...presetVars } } }, store = new Map();
 const extensionSettings = { disabledExtensions: [], connectionManager: { profiles: [{ id: 'p1', name: 'Flash', api: 'openai' }, { id: 'p2', name: 'Novel', api: 'novel' }] } };
 window.extensionSettings = extensionSettings;
 window.currentChat = 'A';
@@ -303,6 +304,10 @@ window.chats = chats; window.store = store;
     await page.click('.wit-tabs button[data-tab=vars]');
     await page.waitForSelector('.wit-var-missing');
     assert.match(await page.textContent('.wit-var-missing'), /2층_Break[\s\S]*쓰는 엔트리: 탑 내부/);
+    // the chat also holds preset variables: they are listed by name only, never as editable rows
+    assert.equal(await page.$$eval('.wit-var input', i => i.length), 1, 'only the managed (missing) variable has an input');
+    assert.match(await page.textContent('.wit-var-other summary'), /다른 변수 3개/);
+    assert.ok(!(await page.textContent('.wit-body')).includes('CTRLCTRL'), 'preset values are not shown');
     await page.fill('.wit-var-missing input', '2025/04/22'); await page.press('.wit-var-missing input', 'Enter');
     await page.waitForFunction(() => window.chats.B.variables?.['2층_Break'] === '2025/04/22');
     await page.waitForSelector('.wit-var-missing', { state: 'detached' });
@@ -316,14 +321,22 @@ window.chats = chats; window.store = store;
     await page.click('.wit-var:has-text("클리어_층") button >> text=되돌리기');
     await page.waitForFunction(() => window.chats.B.variables['클리어_층'] === '1');
     await page.fill('.wit-var-add input >> nth=0', 'a}}b'); await page.click('.wit-var-add button');
-    assert.equal(await page.evaluate(() => Object.keys(window.chats.B.variables).join()), '2층_Break,클리어_층');
+    assert.equal(await page.evaluate(() => 'a}}b' in window.chats.B.variables), false);
     if (shots) await page.screenshot({ path: path.join(shots, '9-vars.png') });
     await page.click('.wit-var:has-text("클리어_층") button >> text=✕');
     await page.waitForFunction(() => !('클리어_층' in window.chats.B.variables));
+    // a preset variable can be handed over on purpose
+    await page.click('.wit-var-other summary');
+    await page.click('.wit-var-other-row:has-text("designStoryPrompt") button');
+    await page.waitForSelector('.wit-var:has-text("designStoryPrompt") input');
+    assert.equal(await page.inputValue('.wit-var:has-text("designStoryPrompt") input'), '继续');
+    assert.match(await page.textContent('.wit-var-other summary'), /다른 변수 2개/);
+    await page.click('.wit-var:has-text("designStoryPrompt") button >> text=✕');
+    await page.waitForFunction(() => !('designStoryPrompt' in window.chats.B.variables));
 
     // 13. Auto tracking: bookmark at 2 (set when switched on), every 3 turns, 2 newest wait.
     await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({
-        vars: [{ name: '2층_Break', value: '2025/05/01', reason: '날짜가 바뀜' }, { name: '모르는_변수', value: 'x' }],
+        vars: [{ name: '2층_Break', value: '2025/05/01', reason: '날짜가 바뀜' }, { name: '모르는_변수', value: 'x' }, { name: 'formatCtrlBot', value: 'hacked' }],
         proposals: [{ action: 'create', comment: '자동 엔트리', keys: ['x'], content: 'auto' }] }); });
     const endGeneration = () => page.evaluate(async () => { await window.eventSource.emit('GENERATION_ENDED'); await new Promise(r => setTimeout(r, 500)); });
     await page.evaluate(() => { window.addTurns(3, 'A'); window.chat[2].is_system = true; window.chat[3].is_system = true; }); // the first pair is hidden, like a summary extension does
@@ -339,12 +352,14 @@ window.chats = chats; window.store = store;
     assert.ok(!chatPart.includes('B lena'), 'the newest turns wait');
     assert.equal((chatPart.match(/<Status>/g) || []).length, 1, 'only the newest Status block is kept');
     assert.ok(chatPart.includes('[DATE]A2[/DATE]'));
-    assert.match(track[1].content, /## CURRENT VALUES \(variable = value\)\n\n2층_Break = 2025\/04\/22/);
+    assert.match(track[1].content, /## CURRENT VALUES \(variable = value\)\n\n2층_Break = 2025\/04\/22\n\n## ENTRY LIST/, 'only the managed variable is sent');
+    assert.ok(!track[1].content.includes('formatCtrlBot') && !track[1].content.includes('statement'), 'preset variables never reach the AI');
     await page.click('.wit-tabs button[data-tab=ai]');
     await page.waitForSelector('.wit-card .wit-tag >> text=자동');
     let st = await page.evaluate(() => ({ vars: window.chats.B.variables, meta: window.chats.B.worldinfo_tracker }));
     assert.equal(st.vars['2층_Break'], '2025/05/01', 'value changes are applied right away');
     assert.ok(!('모르는_변수' in st.vars), 'unknown variables are ignored');
+    assert.equal(st.vars.formatCtrlBot, 'CTRL'.repeat(100), 'preset variables cannot be changed by the AI');
     assert.equal(st.meta.varLog[0].source, 'auto');
     assert.equal(st.meta.trackAt, 8, 'bookmark right after the 3rd turn');
     assert.equal(st.meta.trackLast.turns, 3);

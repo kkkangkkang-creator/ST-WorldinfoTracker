@@ -76,7 +76,9 @@ function chatState() {
     const trackSig = typeof saved.trackSig === 'string' ? saved.trackSig : '';
     const trackLast = saved.trackLast && typeof saved.trackLast === 'object' ? saved.trackLast : null;
     const varLog = Array.isArray(saved.varLog) ? saved.varLog.filter(x => x && x.name).slice(0, 40) : [];
-    return { replaced, toggles, proposals, trackAt, trackSig, trackLast, varLog };
+    // Variables this extension manages. A chat holds many others (presets, other tools) that it must not touch.
+    const tracked = [...new Set((Array.isArray(saved.tracked) ? saved.tracked : []).map(validVarName).filter(Boolean))];
+    return { replaced, toggles, proposals, trackAt, trackSig, trackLast, varLog, tracked };
 }
 async function writeChatState(update, key) {
     const c = context();
@@ -97,28 +99,38 @@ function chatVars() {
 }
 const describeChanges = list => list.map(d => `${d.name} ${d.from ?? '없음'} → ${d.value ?? '삭제'}`).join(', ');
 /** value null removes the variable. Returns the changes that actually happened. */
-async function writeVars(changes, source, key = chatKey()) {
+async function writeVars(changes, source, key = chatKey(), { track = false } = {}) {
     const c = context();
     if (!key || key !== chatKey() || !c.chatMetadata) throw new Error('채팅이 바뀌어 저장하지 않았어요.');
     const vars = (c.chatMetadata.variables ??= {}), before = chatVars(), next = chatState(), applied = [];
+    let trackChanged = false;
     for (const change of changes) {
         const name = validVarName(change.name);
         if (!name) continue;
         const from = Object.hasOwn(before, name) ? before[name] : null;
         const to = change.value === null || change.value === undefined ? null : String(change.value);
+        // Managed variables: the ones the user or a proposal sets here, minus the ones deleted here.
+        if (to === null) next.tracked = next.tracked.filter(n => n !== name);
+        else if (track && !next.tracked.includes(name)) { next.tracked.push(name); trackChanged = true; }
         if (from === to) continue;
         if (to === null) { delete vars[name]; delete before[name]; } else { vars[name] = to; before[name] = to; }
         next.varLog.unshift({ name, from, to, time: Date.now(), source, reason: change.reason || '' });
         applied.push({ name, from, value: to, reason: change.reason || '' });
     }
-    if (!applied.length) return applied;
+    if (!applied.length && !trackChanged) return applied;
     next.varLog = next.varLog.slice(0, 40);
     c.chatMetadata[KEY] = next;
     await c.saveMetadata();
     return applied;
 }
-// Variables the AI may set: ones this chat already has, or ones an entry reads.
-const knownVarNames = entries => new Set([...Object.keys(chatVars()), ...findVarRefs(entries).keys()]);
+// The variables this extension manages: ones an entry reads with {{getvar::}} and ones added here.
+// Everything else in the chat (preset variables, other tools) is left alone and never sent to the AI.
+const trackedVarNames = entries => new Set([...chatState().tracked, ...findVarRefs(entries).keys()]);
+function promptVars(entries) {
+    const all = chatVars(), out = {};
+    for (const name of trackedVarNames(entries)) out[name] = (all[name] ?? '').slice(0, 300);
+    return out;
+}
 
 function worldNames() { return context().getWorldInfoNames?.() ?? []; }
 function chatBook() {
@@ -500,12 +512,12 @@ async function askAi() {
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
         const chatLines = thinTagBlocks(recentChatLines(context().chat, settings().chatTurns), parseTagList(settings().trackTags));
         const details = pickDetails(entries, { request, activeKeys, targets: new Set(aiTargets.keys()), globals: scanGlobals() });
-        const messages = buildAiMessages({ request, entries, details, chatLines, vars: chatVars(), extra: settings().customPrompt });
+        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
         aiRaw = text;
         const parsed = parseAiResult(text);
-        const known = knownVarNames(entries);
+        const known = trackedVarNames(entries);
         const applied = await writeVars(parsed.vars.filter(v => known.has(v.name)), 'ask', key);
         const { ready, dropped } = buildReady(parsed.proposals, details, { request });
         await writeChatState(st => { st.proposals = [...ready, ...st.proposals]; }, key);
@@ -560,12 +572,12 @@ async function trackChat({ manual = false } = {}) {
     aiNote = `대화 ${range.turns}턴 · 약 ${chars.toLocaleString()}자를 읽는 중…`; render();
     try {
         const entries = await getSortedEntries();
-        const known = knownVarNames(entries), applied = [], allReady = [];
+        const known = trackedVarNames(entries), applied = [], allReady = [];
         let dropped = 0;
         for (const [i, part] of parts.entries()) {
             if (parts.length > 1) { aiNote = `대화를 읽는 중… (${i + 1}/${parts.length})`; render(); }
             const details = pickTrackDetails(entries, part.join('\n'), { budget: TRACK_BODY_BUDGET, globals: scanGlobals() });
-            const messages = buildTrackMessages({ lines: part, vars: chatVars(), entries, details, extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
+            const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
             const reply = await callAi(messages, controller.signal);
             if (controller.signal.aborted || key !== chatKey()) return;
             aiRaw = reply;
@@ -617,7 +629,7 @@ function proposalEdits(p, raw) {
 async function applyProposalVars(p, key) {
     if (!p.vars?.length) return;
     try {
-        const done = await writeVars(p.vars.map(v => ({ name: v.name, value: v.value, reason: p.reason })), 'proposal', key);
+        const done = await writeVars(p.vars.map(v => ({ name: v.name, value: v.value, reason: p.reason })), 'proposal', key, { track: true });
         if (done.length) notify(`현재 값 ${done.length}개를 정했어요: ${describeChanges(done)}`);
     } catch (error) { notify(error.message, true); }
 }
@@ -787,7 +799,7 @@ function renderAi() {
 // ---------- 현재 값 (chat variables) ----------
 async function saveVar(name, value, source = 'user') {
     try {
-        const done = await writeVars([{ name, value }], source);
+        const done = await writeVars([{ name, value }], source, chatKey(), { track: source === 'user' });
         if (done.length) notify(`${describeChanges(done)} · 다음 응답부터 적용돼요`);
     } catch (error) { notify(error.message, true); }
     render(true);
@@ -815,18 +827,35 @@ function varRow(name, value, titles, log, missing = false) {
     }
     return row;
 }
+async function trackName(name) {
+    try { await writeChatState(st => { if (!st.tracked.includes(name)) st.tracked.push(name); }, chatKey()); } catch (error) { notify(error.message, true); }
+    render(true);
+}
 function renderVars() {
-    const vars = chatVars(), loaded = allChat === chatKey(), refs = loaded ? findVarRefs(allEntries) : new Map(), log = chatState().varLog;
-    body.append(el('p', 'wit-note', '이 채팅의 값이에요. 엔트리 본문에 {{getvar::이름}}이라고 쓰면 이 값으로 바뀌어 들어가요 · 다음 응답부터 적용'));
-    const names = Object.keys(vars);
-    for (const name of names) body.append(varRow(name, vars[name], refs.get(name), log.find(l => l.name === name)));
-    if (!names.length) body.append(el('p', 'wit-empty', '아직 값이 없어요.\n아래에서 추가하거나, 엔트리 수정 창의 "값 뽑기"로 AI에게 맡길 수 있어요.'));
-    const missing = [...refs.keys()].filter(n => !Object.hasOwn(vars, n));
+    const all = chatVars(), loaded = allChat === chatKey(), refs = loaded ? findVarRefs(allEntries) : new Map(), st = chatState();
+    const tracked = new Set([...st.tracked, ...refs.keys()]);
+    body.append(el('p', 'wit-note', '이 확장이 관리하는 값이에요 (엔트리가 {{getvar::이름}}으로 읽는 것 + 여기서 추가한 것). 고치면 다음 응답부터 적용돼요.'));
+    const names = [...tracked].filter(n => Object.hasOwn(all, n));
+    for (const name of names) body.append(varRow(name, all[name], refs.get(name), st.varLog.find(l => l.name === name)));
+    if (!names.length) body.append(el('p', 'wit-empty', '아직 관리하는 값이 없어요.\n아래에서 추가하거나, 엔트리 수정 창의 "값 뽑기"로 AI에게 맡길 수 있어요.'));
+    const missing = [...refs.keys()].filter(n => !Object.hasOwn(all, n));
     if (missing.length) {
         const warn = el('section', 'wit-var-missing');
         warn.append(el('h4', '', '⚠ 값이 없는 변수 · 엔트리에서 쓰고 있어요'));
         for (const name of missing) warn.append(varRow(name, '', refs.get(name), null, true));
         body.append(warn);
+    }
+    // Presets and other tools keep many variables in the same chat. Names only, never edited or sent to the AI.
+    const others = loaded ? Object.keys(all).filter(n => !tracked.has(n)) : [];
+    if (others.length) {
+        const box = el('details', 'wit-var-other');
+        box.append(el('summary', '', `다른 변수 ${others.length}개 · 프리셋 등이 쓰는 값이라 건드리지 않아요`));
+        for (const name of others) {
+            const row = el('div', 'wit-var-other-row');
+            row.append(el('span', '', name), button('관리에 추가', () => trackName(name), 'wit-link', `${name}을(를) 이 확장이 관리하게 해요`));
+            box.append(row);
+        }
+        body.append(box);
     }
     const add = el('form', 'wit-var-add');
     const name = el('input'); name.placeholder = '이름 (예: 2층_Break)'; name.setAttribute('aria-label', '새 변수 이름');

@@ -238,7 +238,7 @@ export function pickDetails(entries, { request = '', activeKeys = new Set(), tar
 
 const entryList = entries => entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).slice(0, 4).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
 const entryBodies = details => details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
-const valueList = vars => Object.entries(vars || {}).map(([k, v]) => `${k} = ${v}`);
+const valueList = vars => Object.entries(vars || {}).map(([k, v]) => `${k} = ${v === '' ? '(not set)' : v}`);
 const withExtra = (base, extra) => (String(extra ?? '').trim()
     ? `${base}\n\nAdditional instructions from the user (follow them unless they break the JSON format):\n${extra.trim()}` : base);
 

@@ -293,6 +293,7 @@ test('tracker messages and prompts', () => {
     assert.match(system.content, /Additional instructions[^\n]*\n한국어로$/);
     assert.match(user.content, /## CURRENT VALUES \(variable = value\)\n\n클리어_층 = 1/);
     assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d \| keyword/);
+    assert.match(buildTrackMessages({ lines: [], vars: { 새값: '' }, entries: [], details: [] })[1].content, /새값 = \(not set\)/);
     assert.match(user.content, /## NEW CHAT \(oldest first\) - part 2 of 3\n\nLena: hi$/);
     for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) {
         assert.ok(prompt.includes(WRITING_RULES));
