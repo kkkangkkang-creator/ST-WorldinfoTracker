@@ -247,6 +247,29 @@ async function revertCopy(rep, key) {
 function scanGlobals() {
     return { depth: world_info_depth, caseSensitive: world_info_case_sensitive, matchWholeWords: world_info_match_whole_words };
 }
+// Remember each chat's last activation so the count survives a reload or a chat switch.
+const LAST_KEY = 'wit-last-activation', LAST_MAX = 30;
+function readLastAll() {
+    try { const all = JSON.parse(globalThis.localStorage?.getItem(LAST_KEY) || '{}'); return all && typeof all === 'object' ? all : {}; } catch { return {}; }
+}
+function saveLast(r) {
+    if (!r.chat) return;
+    const all = readLastAll();
+    delete all[r.chat];
+    all[r.chat] = r.entries;
+    const keys = Object.keys(all);
+    for (const k of keys.slice(0, Math.max(0, keys.length - LAST_MAX))) delete all[k];
+    try { globalThis.localStorage?.setItem(LAST_KEY, JSON.stringify(all)); } catch {}
+}
+function loadLast(chat) {
+    const entries = chat ? readLastAll()[chat] : null;
+    return Array.isArray(entries) ? { chat, phase: 'ready', entries, saved: true } : { chat: '', phase: 'unknown', entries: [] };
+}
+function setReady(entries) {
+    result = { chat: generation.chat, phase: 'ready', entries };
+    saveLast(result);
+}
+
 function capture(entries) {
     const c = context(), seen = new Set(), list = [];
     for (const entry of Array.from(entries || [])) {
@@ -946,7 +969,7 @@ function renderActive() {
     if (!hasActivationHook) { body.append(el('p', 'wit-empty', '이 SillyTavern 버전은 활성화 조회를 지원하지 않아요.')); return; }
     const known = result.chat === chatKey() && result.phase === 'ready';
     if (!known) { body.append(el('p', 'wit-empty', result.phase === 'pending' && result.chat === chatKey() ? '활성화 확인 중…' : '응답을 한 번 생성하면 여기에 보여요.')); return; }
-    body.append(el('p', 'wit-note', `이번 응답에 들어간 엔트리 ${result.entries.length}개 · 키워드는 추정 · ON/OFF는 이 채팅만, 다음 응답부터`));
+    body.append(el('p', 'wit-note', `${result.saved ? '마지막으로 기록된 응답' : '이번 응답'}에 들어간 엔트리 ${result.entries.length}개 · 키워드는 추정 · ON/OFF는 이 채팅만, 다음 응답부터`));
     if (!result.entries.length) { body.append(el('p', 'wit-empty', '활성화된 엔트리가 없어요.')); return; }
     renderEntries(result.entries);
 }
@@ -1243,7 +1266,8 @@ function buildMenuItem() {
 function init() {
     if (!active) return;
     buildUI(); buildSettings(); buildMenuItem();
-    showFloatingIcon();
+    if (!generation) result = loadLast(chatKey());
+    showFloatingIcon(); render();
 }
 
 export function onEnable() {
@@ -1266,20 +1290,20 @@ export function onEnable() {
     });
     listen(event_types.WORLD_INFO_ACTIVATED, entries => {
         if (!generation || generation.chat !== chatKey() || result.phase !== 'pending') return;
-        try { result = { chat: generation.chat, phase: 'ready', entries: capture(entries) }; } catch (error) { console.warn('[WorldInfo Tracker] Capture failed', error); }
+        try { setReady(capture(entries)); } catch (error) { console.warn('[WorldInfo Tracker] Capture failed', error); }
         render();
     });
     // Reaching the API payload proves the prompt was built; with no activation event that means zero entries.
     listen(event_types.GENERATE_AFTER_DATA, (_data, dryRun) => {
-        if (!dryRun && generation && result.phase === 'pending' && generation.chat === chatKey()) { result.phase = 'ready'; render(); }
+        if (!dryRun && generation && result.phase === 'pending' && generation.chat === chatKey()) { setReady([]); render(); }
     });
     for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) listen(event_types[name], () => {
-        if (result.phase === 'pending') result.phase = 'unknown';
+        if (result.phase === 'pending') result = loadLast(chatKey());
         generation = null; render();
         if (name === 'GENERATION_ENDED') setTimeout(maybeAutoTrack, 300);
     });
     listen(event_types.CHAT_CHANGED, () => {
-        generation = null; result = { chat: '', phase: 'unknown', entries: [] };
+        generation = null; result = loadLast(chatKey());
         allEntries = []; allChat = ''; allError = ''; allToken++; fileOn.clear();
         if (aiBusy) cancelAi();
         aiError = ''; aiNote = ''; trackRetryAt = 0; aiTargets.clear();

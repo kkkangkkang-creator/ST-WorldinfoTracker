@@ -205,6 +205,11 @@ window.chats = chats; window.store = store;
     if (shots) await page.screenshot({ path: path.join(shots, '6-toggles.png') });
     await page.evaluate(async () => { window.currentChat = 'A'; await window.eventSource.emit('CHAT_CHANGED'); });
     assert.equal((await sortedOf())['AU#5'], true);
+    // The last activation count comes back with the chat, and chat B (never generated) shows none.
+    await page.waitForFunction(() => document.querySelector('.wit-badge')?.textContent === '2');
+    await page.evaluate(async () => { window.currentChat = 'B'; await window.eventSource.emit('CHAT_CHANGED'); });
+    await page.waitForFunction(() => document.querySelector('.wit-badge')?.hidden);
+    await page.evaluate(async () => { window.currentChat = 'A'; await window.eventSource.emit('CHAT_CHANGED'); });
     await page.evaluate(async () => { window.currentChat = 'B'; await window.eventSource.emit('CHAT_CHANGED'); });
 
     // 9. Generating blocks saves.
