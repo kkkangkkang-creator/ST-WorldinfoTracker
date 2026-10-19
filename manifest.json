@@ -1,0 +1,17 @@
+{
+  "display_name": "월드인포 트래커",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "song jung",
+  "version": "0.1.0",
+  "homePage": "https://github.com/kkkangkkang-creator/ST-WorldinfoTracker",
+  "auto_update": false,
+  "hooks": {
+    "enable": "onEnable",
+    "disable": "onDisable",
+    "delete": "onDisable"
+  }
+}

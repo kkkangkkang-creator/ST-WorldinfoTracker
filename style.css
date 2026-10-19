@@ -1,0 +1,60 @@
+.wit-panel,.wit-dialog { --wit-bg:#faf9f6; --wit-card:#f0f2ed; --wit-line:#e1e4dd; --wit-text:#2d342f; --wit-muted:#70786f; --wit-accent:#4f6584; --wit-key:#e3ebf6; color:var(--wit-text); background:var(--wit-bg); font-family:inherit; font-size:13px; line-height:1.4; text-align:left; box-sizing:border-box; color-scheme:light; }
+.wit-panel *,.wit-dialog * { box-sizing:border-box; }
+.wit-panel[hidden] { display:none!important; }
+.wit-panel[popover] { inset:auto 20px 85px auto; margin:0; overflow:visible; }
+.wit-panel { position:fixed; right:20px; bottom:85px; width:360px; height:min(580px,calc(100dvh - 115px)); max-width:calc(100vw - 24px); z-index:2147483000!important; display:flex; flex-direction:column; border:1px solid var(--wit-line); border-radius:16px; box-shadow:0 12px 40px #24302622; padding:12px; gap:8px; }
+.wit-header,.wit-modal-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+.wit-panel h2 { font-size:17px; font-weight:700; margin:4px 0; color:var(--wit-text); }
+.wit-header p { margin:0; font-size:11px; overflow-wrap:anywhere; }
+.wit-panel h2,.wit-dialog h3,.wit-section h4 { text-shadow:none; }
+.wit-panel button,.wit-dialog button { font-family:inherit; font-size:13px; cursor:pointer; border:1px solid transparent; border-radius:7px; padding:5px 9px; line-height:1.35; color:var(--wit-text); background:var(--wit-card); white-space:normal; min-height:32px; text-shadow:none; }
+.wit-panel button:focus-visible,.wit-dialog button:focus-visible,.wit-panel input:focus-visible,.wit-dialog input:focus-visible,.wit-dialog textarea:focus-visible { outline:2px solid var(--wit-accent); outline-offset:2px; }
+.wit-panel button:hover:not(:disabled),.wit-dialog button:hover:not(:disabled) { filter:brightness(.97); }
+.wit-panel button:disabled,.wit-dialog button:disabled { opacity:.45; cursor:default; }
+.wit-panel .wit-close { background:transparent; font-size:25px; padding:0 5px; min-width:32px; color:var(--wit-muted); }
+.wit-tabs { display:flex; background:#ffffff; padding:2px; border-radius:9px; gap:2px; }
+.wit-tabs button { flex:1; background:transparent; color:var(--wit-muted); }
+.wit-tabs button.is-active { background:#e4eaf2; color:#34465e; }
+.wit-toolbar { display:flex; gap:7px; }
+.wit-panel .wit-primary,.wit-dialog .wit-primary { background:var(--wit-accent); color:#ffffff; font-weight:700; }
+.wit-panel .wit-quiet,.wit-dialog .wit-quiet { background:transparent; border-color:var(--wit-line); color:var(--wit-muted); }
+.wit-muted { color:var(--wit-muted); }
+.wit-panel input.wit-search,.wit-dialog input:not([type=checkbox]),.wit-dialog textarea { flex:1; width:100%; min-width:0; background:#ffffff; color:var(--wit-text); border:1px solid var(--wit-line); border-radius:9px; padding:7px 9px; font-size:13px; font-family:inherit; box-shadow:none; }
+.wit-dialog textarea { resize:vertical; display:block; margin-top:6px; }
+.wit-dialog textarea.wit-content { min-height:220px; line-height:1.5; }
+.wit-body { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; padding-right:2px; }
+.wit-note { margin:0 0 6px; font-size:11px; color:var(--wit-muted); }
+.wit-section { display:flex; flex-direction:column; margin-bottom:10px; }
+.wit-section h4 { font-size:12px; margin:6px 0 2px; color:var(--wit-accent); overflow-wrap:anywhere; }
+.wit-panel button.wit-row { display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:transparent; border:0; border-bottom:1px solid var(--wit-line); border-radius:0; padding:6px 2px; }
+.wit-mode { flex:none; font-size:13px; }
+.wit-copy { flex:1; min-width:0; }
+.wit-copy strong { display:block; font-size:13px; font-weight:600; overflow-wrap:anywhere; }
+.wit-why { display:block; margin-top:2px; font-size:11px; color:var(--wit-muted); overflow-wrap:anywhere; }
+.wit-key { display:inline-block; background:var(--wit-key); color:#2f4566; border-radius:5px; padding:0 5px; margin:1px 3px 1px 0; font-weight:600; }
+.wit-tags { display:flex; flex:none; gap:3px; }
+.wit-tag { font-size:10px; border:1px solid var(--wit-line); border-radius:5px; padding:1px 5px; color:var(--wit-accent); }
+.wit-tag.is-off { color:var(--wit-muted); }
+.wit-empty { text-align:center; color:var(--wit-muted); padding:22px 8px; font-size:12px; }
+.wit-error { border:1px solid #e1b5a8; color:#8e3c27; padding:10px; border-radius:8px; font-size:12px; }
+.wit-status { border-top:1px solid var(--wit-line); padding-top:6px; color:var(--wit-muted); font-size:10px; min-height:14px; }
+.wit-badge { position:absolute; top:-2px; right:-2px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#4f6584; color:#ffffff; font-size:11px; line-height:18px; font-weight:700; text-align:center; pointer-events:none; }
+.wit-badge[hidden] { display:none; }
+#wit-floating-launcher::backdrop { background:transparent; pointer-events:none; }
+.wit-dialog { width:560px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 32px); border:1px solid var(--wit-line); border-radius:12px; padding:14px; margin:auto; overflow:auto; box-shadow:0 12px 40px #24302622; }
+.wit-dialog::backdrop { background:#26302644; }
+.wit-modal-head h3 { margin:0; font-size:16px; color:var(--wit-text); }
+.wit-where { font-size:12px; margin:8px 0; padding:8px 10px; background:var(--wit-card); border-radius:8px; overflow-wrap:anywhere; }
+.wit-field { display:block; margin:10px 0; font-size:12px; color:var(--wit-muted); }
+.wit-field input { display:block; margin-top:6px; }
+.wit-check { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px; cursor:pointer; }
+.wit-check input { width:18px; height:18px; margin:0; accent-color:var(--wit-accent); }
+.wit-label { margin:12px 0 4px; font-size:12px; color:var(--wit-muted); }
+.wit-replace { display:flex; gap:6px; }
+.wit-modal-footer { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.wit-size { display:flex; align-items:center; gap:8px; margin:6px 0; }
+@media(max-width:520px) {
+    .wit-panel,.wit-panel[popover] { inset:auto 8px 79px auto; right:8px; bottom:79px; width:calc(100vw - 16px); max-width:none; height:min(560px,calc(100dvh - 100px)); border-radius:14px; }
+    .wit-dialog { padding:12px; }
+    .wit-replace { flex-wrap:wrap; }
+}
