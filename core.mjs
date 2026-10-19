@@ -161,12 +161,13 @@ The user is talking to you, the lorebook maintainer, not to the roleplay: every 
 
 Reply with JSON only, no other text, in exactly this shape:
 {"proposals":[
- {"action":"create","comment":"title","keys":["keyword"],"constant":false,"content":"entry text","reason":"why"},
- {"action":"update","world":"book name","uid":12,"comment":"title","keys":["keyword"],"content":"complete new entry text","reason":"why"}
+ {"action":"update","world":"book name","uid":12,"edits":[{"find":"exact text from the entry","replace":"new text"}],"reason":"why"},
+ {"action":"create","comment":"title","keys":["keyword"],"constant":false,"content":"entry text","reason":"why"}
 ]}
 
 Rules:
-- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid. Give the complete new content, not a diff. Keep everything that is still true; change only what the request or the story requires.
+- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid.
+- For an update, use "edits": each "find" is copied character for character from that entry and is replaced everywhere it occurs. Keep finds short but unambiguous. Only for a rewrite of most of the entry, give "content" (the complete new text) instead of "edits". You may add "comment" or "keys" to an update only when they must change.
 - Prefer updating an existing entry over creating a near-duplicate.
 - Match the language, tone and formatting of the existing entries (headings, bullet style).
 - For something that has not happened yet in the story, state its trigger condition explicitly so it is never treated as current fact.
@@ -177,23 +178,20 @@ Rules:
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 /**
- * Picks entries whose full text goes to the AI, within a character budget, in this order:
- * named in the request, active in the last reply, ON constant entries (always in the
- * prompt anyway), other ON entries. OFF entries go in only when named.
+ * Picks entries whose full text goes to the AI, within a character budget: those named in
+ * the request, then those active in the last reply. Only when neither finds anything do the
+ * ON constant entries go in. Bodies are the costly part of a request, so this stays lean.
  */
-export function pickDetails(entries, { request = '', activeKeys = new Set(), budget = 40000, globals = { caseSensitive: false, matchWholeWords: false } } = {}) {
+export function pickDetails(entries, { request = '', activeKeys = new Set(), targets = null, budget = 12000, globals = { caseSensitive: false, matchWholeWords: false } } = {}) {
+    // Entries the user picked are sent alone, whatever their size.
+    if (targets?.size) return entries.filter(e => targets.has(entryKey(e.world, e.uid)));
     const named = e => {
         const title = String(e.comment || '').trim();
         if (title && request.toLowerCase().includes(title.toLowerCase())) return true;
         return keyList(e.key).some(k => keyMatches(request, k, e, globals));
     };
-    const on = entries.filter(e => !e.disable);
-    const ranked = [
-        ...entries.filter(named),
-        ...entries.filter(e => activeKeys.has(entryKey(e.world, e.uid))),
-        ...on.filter(e => e.constant),
-        ...on.filter(e => !e.constant),
-    ];
+    let ranked = [...entries.filter(named), ...entries.filter(e => activeKeys.has(entryKey(e.world, e.uid)))];
+    if (!ranked.length) ranked = entries.filter(e => e.constant && !e.disable);
     const picked = [], seen = new Set();
     let used = 0;
     for (const e of ranked) {
@@ -235,7 +233,11 @@ export function parseProposals(text) {
     try { data = JSON.parse(raw.slice(start, end + 1)); } catch { throw new Error('AI 응답의 JSON 형식이 깨져 있어요.'); }
     const list = Array.isArray(data) ? data : data?.proposals;
     if (!Array.isArray(list)) throw new Error('AI 응답에 proposals 목록이 없어요.');
-    return list.filter(p => p && (p.action === 'create' || p.action === 'update') && typeof p.content === 'string' && p.content.trim())
+    const editsOf = p => (Array.isArray(p.edits) ? p.edits : [])
+        .filter(x => x && typeof x.find === 'string' && x.find && typeof x.replace === 'string')
+        .map(x => ({ find: x.find, replace: x.replace }));
+    const hasContent = p => typeof p.content === 'string' && p.content.trim();
+    return list.filter(p => p && (p.action === 'create' ? hasContent(p) : p.action === 'update' && (hasContent(p) || editsOf(p).length)))
         .map(p => ({
             action: p.action,
             world: p.action === 'update' ? String(p.world ?? '') : '',
@@ -243,9 +245,21 @@ export function parseProposals(text) {
             comment: String(p.comment ?? '').trim(),
             key: keyList(p.keys ?? p.key),
             constant: Boolean(p.constant),
-            content: p.content,
+            content: hasContent(p) ? p.content : null,
+            edits: hasContent(p) ? [] : editsOf(p),
             reason: String(p.reason ?? '').trim(),
         }));
+}
+
+/** Applies find/replace edits; a find that is not in the text makes the whole update fail. */
+export function applyEdits(text, edits) {
+    let content = String(text ?? '');
+    const missing = [];
+    for (const { find, replace } of edits) {
+        if (!content.includes(find)) { missing.push(find); continue; }
+        content = content.split(find).join(replace);
+    }
+    return { content, missing };
 }
 
 /** Line diff (LCS) for showing what an update changes. */

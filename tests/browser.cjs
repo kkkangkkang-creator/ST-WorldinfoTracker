@@ -37,7 +37,7 @@ export async function getSortedEntries() {
 const sharedMock = `
 export const ConnectionManagerRequestService = {
     isProfileSupported: p => p.api === 'openai',
-    sendRequest: async (id, messages) => { window.profileCall = id; window.aiPrompt = messages; return { content: window.aiReply }; },
+    sendRequest: async (id, messages, maxTokens, custom, override) => { window.profileCall = id; window.profileOverride = override; window.aiPrompt = messages; return { content: window.aiReply }; },
 };
 `;
 const page0 = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="${prefix}style.css"></head><body>
@@ -217,19 +217,20 @@ window.chats = chats; window.store = store;
     await page.evaluate(() => {
         window.aiReply = JSON.stringify({ proposals: [
             { action: 'create', comment: '균열', keys: ['균열', 'rift'], content: '## Rifts (not yet occurred)\n- Only after a 10th floor is cleared.', reason: '균열 설정 추가' },
-            { action: 'update', world: 'AU', uid: 2, comment: '헌터물 기본 설정 보강', keys: [], content: 'Around 9 days remain. roughly 9 days remaining.', reason: '타이머 갱신' },
+            { action: 'update', world: 'AU', uid: 2, edits: [{ find: 'two weeks', replace: '9 days' }], reason: '타이머 갱신' },
             { action: 'update', world: 'AU', uid: 0, content: 'made up', reason: 'not shown in full' },
         ] });
     });
     await page.click('.wit-tabs button[data-tab=ai]');
     await page.fill('.wit-ask-input', '헌터물 기본 설정 보강 타이머 9일로, 균열 설정 추가해줘');
-    await page.click('.wit-ask button >> text=보내기');
+    await page.click('.wit-ask-row button >> text=보내기');
     await page.waitForSelector('.wit-card >> nth=1');
     const prompt = await page.evaluate(() => window.aiPrompt);
     assert.equal(prompt[0].role, 'system');
     assert.match(prompt[1].content, /### \[AU #2\] 헌터물 기본 설정 보강/);
     assert.doesNotMatch(prompt[1].content, /### \[AU #0\]/);
     assert.equal(await page.$$eval('.wit-card', c => c.length), 2, 'update of an unseen entry is dropped');
+    assert.ok(await page.$('.wit-card strong >> text=헌터물 기본 설정 보강'), 'edit-style update shows the entry title');
     assert.equal(await page.textContent('.wit-tabs button[data-tab=ai]'), 'AI 2');
     assert.deepEqual(await page.$$eval('.wit-diff-add', d => d.map(x => x.textContent)), ['Around 9 days remain. roughly 9 days remaining.']);
     if (shots) await page.screenshot({ path: path.join(shots, '7-ai.png') });
@@ -253,28 +254,46 @@ window.chats = chats; window.store = store;
     // A broken reply shows an error, keeps the request text.
     await page.evaluate(() => { window.aiReply = 'sorry, I cannot'; });
     await page.fill('.wit-ask-input', '아무거나');
-    await page.click('.wit-ask button >> text=보내기');
+    await page.click('.wit-ask-row button >> text=보내기');
     await page.waitForSelector('.wit-error');
     assert.equal(await page.inputValue('.wit-ask-input'), '아무거나');
 
     // 11. Settings tab: profile list falls back to shared.js, extra instructions reach the AI.
     await page.click('.wit-tabs button[data-tab=setup]');
     await page.waitForSelector('.wit-setup:not([hidden])');
-    assert.deepEqual(await page.$$eval('.wit-setup select option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
-    await page.selectOption('.wit-setup select', 'p1');
+    assert.deepEqual(await page.$$eval('.wit-setup select.wit-profile option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
+    await page.selectOption('.wit-setup select.wit-profile', 'p1');
     await page.fill('.wit-setup-prompt', '한국어로 써줘');
     const numbers = await page.$$('.wit-setup input[type=number]');
     await numbers[1].fill('2'); await numbers[1].press('Tab');
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoEvery]; }), ['p1', '한국어로 써줘', 2]);
     if (shots) await page.screenshot({ path: path.join(shots, '8-setup.png') });
     await page.click('.wit-tabs button[data-tab=ai]');
-    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 최근 대화 10턴 · 2챗마다 자동/);
+    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 대화 10턴 · 2챗마다 자동/);
     await page.evaluate(() => { window.aiReply = '{"proposals":[]}'; });
     await page.fill('.wit-ask-input', '확인');
-    await page.click('.wit-ask button >> text=보내기');
+    await page.click('.wit-ask-row button >> text=보내기');
     await page.waitForFunction(() => window.profileCall === 'p1');
     assert.match(await page.evaluate(() => window.aiPrompt[0].content), /Additional instructions from the user[\s\S]*한국어로 써줘$/);
-    await page.waitForFunction(() => document.querySelector('.wit-ask button')?.textContent === '보내기');
+    assert.deepEqual(await page.evaluate(() => window.profileOverride), { reasoning_effort: 'min' }, 'thinking off by default');
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+
+    // 11b. "AI로 고치기" from the editor sends only that entry.
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+    await page.click('.wit-tabs button[data-tab=all]');
+    await page.click('.wit-row >> text=탑 내부');
+    await page.click('.wit-dialog button >> text=AI로 고치기');
+    await page.waitForSelector('.wit-target >> text=탑 내부 ×');
+    await page.fill('.wit-ask-input', '탑 내부에 몬스터 정보 추가');
+    await page.evaluate(() => { window.profileCall = null; });
+    await page.click('.wit-ask-row button >> text=보내기');
+    await page.waitForFunction(() => window.profileCall === 'p1');
+    const details = await page.evaluate(() => window.aiPrompt[1].content.split('## ENTRY DETAILS')[1].split('## RECENT CHAT')[0]);
+    assert.match(details, /### \[AU #5\] 탑 내부/);
+    assert.equal((details.match(/### \[/g) || []).length, 1, 'only the picked entry body is sent');
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+    await page.click('.wit-target >> text=탑 내부 ×');
+    await page.waitForSelector('.wit-target-auto');
 
     // 12. Automatic proposals every 2 chat messages; swipes (no new message) don't count.
     await page.evaluate(() => { window.profileCall = null; window.aiReply = JSON.stringify({ proposals: [{ action: 'create', comment: '자동 엔트리', keys: ['x'], content: 'auto' }] }); });

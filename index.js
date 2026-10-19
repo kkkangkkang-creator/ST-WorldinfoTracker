@@ -6,7 +6,7 @@ import {
 import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
-    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, AUTO_REQUEST,
+    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits, AUTO_REQUEST,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -19,7 +19,7 @@ const modeLabels = { constant: '상시', keyword: '키워드', vectorized: '벡�
 
 let active = false;
 const subscriptions = [];
-let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag, toolbar, aiBox, aiInput, aiSend, aiMeta, setupBox, fillSetup;
+let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag, toolbar, aiBox, aiInput, aiSend, aiMeta, aiTargetRow, setupBox, fillSetup;
 let tab = 'active', search = '', busy = false;
 let generation = null, result = { chat: '', phase: 'unknown', entries: [] };
 let allEntries = [], allChat = '', allError = '', allToken = 0, refreshTimer;
@@ -44,6 +44,7 @@ function settings() {
     }
     c.extensionSettings[KEY].autoEvery ??= 0;
     c.extensionSettings[KEY].customPrompt ??= '';
+    c.extensionSettings[KEY].thinking ??= 'min';
     return c.extensionSettings[KEY];
 }
 
@@ -354,6 +355,10 @@ async function openEditor(item, options = {}) {
         }, 'wit-quiet'));
     }
     if (item) {
+        footer.append(button('AI로 고치기', () => {
+            aiTargets.clear(); aiTargets.set(entryKey(item.world, item.uid), entryTitle(raw));
+            closeDialog(); tab = 'ai'; render(); aiInput.focus();
+        }, 'wit-quiet', '이 엔트리만 AI에게 보내요'));
         const backup = await readBackup(item.world, item.uid);
         if (backup && dialog === d) footer.append(button('저장 전 내용 불러오기', () => {
             title.value = backup.comment; keys.value = formatKeys(backup.key); keys2.value = formatKeys(backup.keysecondary);
@@ -366,6 +371,8 @@ async function openEditor(item, options = {}) {
 
 // ---------- AI ----------
 let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '';
+// Entries the user picked for the next request (entryKey -> title); empty = automatic.
+const aiTargets = new Map();
 // Older builds don't expose the profile service on getContext(); shared.js always has it.
 let sharedServices = null;
 async function loadSharedServices() {
@@ -391,7 +398,9 @@ async function callAi(messages, signal) {
         if (s.profileId) {
             const service = connectionService();
             if (typeof service?.sendRequest !== 'function') throw new Error('연결 프로필 요청을 지원하지 않는 SillyTavern 버전이에요.');
-            const res = await service.sendRequest(s.profileId, messages, s.maxTokens, { stream: false, signal, extractData: true, includePreset: true, includeInstruct: true });
+            // 'min' turns reasoning off where the backend supports it (Gemini thinking budget 0).
+            const override = s.thinking && s.thinking !== 'auto' ? { reasoning_effort: s.thinking } : {};
+            const res = await service.sendRequest(s.profileId, messages, s.maxTokens, { stream: false, signal, extractData: true, includePreset: true, includeInstruct: true }, override);
             return typeof res === 'string' ? res : String(res?.content ?? '');
         }
         if (typeof c.generateRaw !== 'function') throw new Error('generateRaw를 지원하는 SillyTavern 버전이 필요해요.');
@@ -413,7 +422,8 @@ async function askAi({ auto = false } = {}) {
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
         const chatLines = recentChatLines(context().chat, settings().chatTurns);
         // An automatic check has no request text, so entries named in the recent chat get priority.
-        const details = pickDetails(entries, { request: auto ? chatLines.join('\n') : request, activeKeys, globals: scanGlobals() });
+        const targets = auto ? null : new Set(aiTargets.keys());
+        const details = pickDetails(entries, { request: auto ? chatLines.join('\n') : request, activeKeys, targets, globals: scanGlobals() });
         const messages = buildAiMessages({ request, entries, details, chatLines, extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
@@ -427,15 +437,20 @@ async function askAi({ auto = false } = {}) {
             // Only entries the AI saw in full may be rewritten.
             const target = detailed.get(entryKey(p.world, p.uid));
             if (!target) { dropped++; continue; }
-            ready.push({ ...p, id, request: auto ? '' : request, auto, world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
+            if (p.edits.length) {
+                const { content, missing } = applyEdits(target.content, p.edits);
+                if (missing.length || content === target.content) { dropped++; continue; }
+                p.content = content;
+            }
+            ready.push({ ...p, id, request: auto ? '' : request, auto, title: entryTitle(target), world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
         }
         await writeChatState(s => { s.proposals = [...ready, ...s.proposals]; }, key);
         if (auto) {
             if (ready.length) notify(`AI가 월드인포 변경안 ${ready.length}개를 제안했어요. 트래커의 AI 탭에서 확인하세요.`);
         } else {
             aiInput.value = '';
-            if (!ready.length) notify(dropped ? 'AI가 내용을 보지 못한 엔트리만 고치려 해서 버렸어요.' : 'AI가 바꿀 게 없다고 했어요.');
-            else if (dropped) notify(`제안 ${ready.length}개 · 내용을 보지 못한 엔트리 수정 ${dropped}개는 버렸어요.`);
+            if (!ready.length) notify(dropped ? 'AI의 수정안이 엔트리와 맞지 않아 버렸어요. 대상 엔트리를 골라서 다시 요청해보세요.' : 'AI가 바꿀 게 없다고 했어요.');
+            else if (dropped) notify(`제안 ${ready.length}개 · 엔트리와 맞지 않는 수정안 ${dropped}개는 버렸어요.`);
         }
     } catch (error) {
         if (!controller.signal.aborted) aiError = `${auto ? '자동 제안 · ' : ''}${error.message || String(error)}`;
@@ -522,7 +537,7 @@ function proposalCard(p) {
     const isCreate = p.action === 'create';
     const inChat = !isCreate && (p.world === chatBook() || chatState().replaced.some(r => r.world === p.world && String(r.uid) === String(p.uid)));
     const head = el('div', 'wit-card-head');
-    head.append(el('span', `wit-kind is-${p.action}`, isCreate ? '새 엔트리' : '수정'), el('strong', '', p.comment || (isCreate ? '제목 없음' : `엔트리 ${p.uid}`)));
+    head.append(el('span', `wit-kind is-${p.action}`, isCreate ? '새 엔트리' : '수정'), el('strong', '', p.comment || p.title || (isCreate ? '제목 없음' : `엔트리 ${p.uid}`)));
     if (p.auto) head.append(el('span', 'wit-tag', '자동'));
     card.append(head, el('small', 'wit-muted', isCreate ? '📗 이 방 전용 책에 추가' : inChat ? '📗 이 방' : `📘 ${p.world} · 공용`));
     if (p.reason) card.append(el('p', 'wit-reason', p.reason));
@@ -547,9 +562,52 @@ function proposalCard(p) {
     card.append(actions);
     return card;
 }
+function renderTargets() {
+    aiTargetRow.replaceChildren(el('span', 'wit-muted', '대상'));
+    if (!aiTargets.size) aiTargetRow.append(el('span', 'wit-target-auto', '자동 (요청에 나온 것·이번 응답)'));
+    for (const [k, title] of aiTargets) {
+        const chip = button(`${title} ×`, () => { aiTargets.delete(k); render(); }, 'wit-target', `${title} 빼기`);
+        aiTargetRow.append(chip);
+    }
+    aiTargetRow.append(button('＋ 고르기', openTargetPicker, 'wit-quiet', 'AI에게 보낼 엔트리 고르기'));
+}
+// Picking entries keeps a request small: only their bodies are sent.
+async function openTargetPicker() {
+    if (!chatKey()) { notify('채팅을 먼저 열어주세요.'); return; }
+    let entries;
+    try { entries = await getSortedEntries(); } catch (error) { notify(`월드인포를 읽지 못했어요: ${error.message}`, true); return; }
+    const d = modal('AI에게 보낼 엔트리');
+    const main = el('div', 'wit-dialog-body');
+    const find = el('input'); find.type = 'search'; find.placeholder = '제목 · 키워드 검색';
+    const list = el('div', 'wit-pick-list');
+    const picked = new Map(aiTargets);
+    const draw = () => {
+        const q = find.value.trim().toLocaleLowerCase();
+        list.replaceChildren();
+        for (const e of entries) {
+            const title = entryTitle(e), k = entryKey(e.world, e.uid);
+            if (q && !`${title} ${formatKeys(e.key)}`.toLocaleLowerCase().includes(q)) continue;
+            const row = el('label', 'wit-pick');
+            const box = el('input'); box.type = 'checkbox'; box.checked = picked.has(k);
+            box.addEventListener('change', () => { if (box.checked) picked.set(k, title); else picked.delete(k); });
+            const size = String(e.content || '').length;
+            row.append(box, el('span', '', title), el('small', 'wit-muted', `${e.world === chatBook() ? '📗' : '📘'} ${size.toLocaleString()}자`));
+            list.append(row);
+        }
+    };
+    find.addEventListener('input', draw);
+    draw();
+    main.append(find, list);
+    const footer = el('div', 'wit-modal-footer');
+    footer.append(button('이걸로', () => { aiTargets.clear(); for (const [k, t] of picked) aiTargets.set(k, t); closeDialog(); render(); }, 'wit-primary'),
+        button('자동으로', () => { aiTargets.clear(); closeDialog(); render(); }, 'wit-quiet'));
+    d.append(main, footer);
+}
 function renderAi() {
     const s = settings();
-    aiMeta.textContent = `${connectionLabel()} · 최근 대화 ${s.chatTurns}턴${s.autoEvery ? ` · ${s.autoEvery}챗마다 자동` : ''}`;
+    renderTargets();
+    const thinking = s.profileId ? ` · 생각 ${({ min: '끔', low: '낮게', auto: '모델 기본' })[s.thinking] ?? s.thinking}` : '';
+    aiMeta.textContent = `${connectionLabel()}${thinking} · 최근 대화 ${s.chatTurns}턴${s.autoEvery ? ` · ${s.autoEvery}챗마다 자동` : ''}`;
     aiSend.textContent = aiBusy ? '취소' : '보내기';
     aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
     if (aiBusy) body.append(el('p', 'wit-note', 'AI가 엔트리를 살펴보는 중…'));
@@ -792,7 +850,8 @@ function buildUI() {
     aiSend = button('보내기', () => (aiBusy ? cancelAi() : askAi()), 'wit-primary');
     aiMeta = el('small', 'wit-muted');
     const askRow = el('div', 'wit-ask-row'); askRow.append(aiMeta, aiSend);
-    aiBox.append(aiInput, askRow);
+    aiTargetRow = el('div', 'wit-targets');
+    aiBox.append(aiTargetRow, aiInput, askRow);
     setupBox = buildSetup();
     body = el('div', 'wit-body');
     status = el('footer', 'wit-status'); status.setAttribute('role', 'status');
@@ -806,7 +865,7 @@ function buildSetup() {
     const box = el('div', 'wit-setup'); box.hidden = true;
     isolateKeys(box);
     const save = () => { context().saveSettingsDebounced(); render(); };
-    const profile = el('select');
+    const profile = el('select', 'wit-profile');
     profile.addEventListener('change', () => { settings().profileId = profile.value; save(); });
     const profileHint = el('small', 'wit-muted');
     const number = (name, min, max) => {
@@ -818,6 +877,9 @@ function buildSetup() {
         });
         return input;
     };
+    const thinking = el('select', 'wit-thinking');
+    thinking.append(new Option('끄기 (추천)', 'min'), new Option('낮게', 'low'), new Option('모델 기본', 'auto'));
+    thinking.addEventListener('change', () => { settings().thinking = thinking.value; save(); });
     const turns = number('chatTurns', 0, 100), every = number('autoEvery', 0, 200), tokens = number('maxTokens', 256, 65536);
     const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 5;
     prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
@@ -833,7 +895,8 @@ function buildSetup() {
     box.append(
         el('h4', '', 'AI'),
         row('연결', profile, '', profileHint),
-        row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수'),
+        row('생각', thinking, '', '모델의 생각(추론)에 쓰는 토큰. 끄면 훨씬 싸요. 연결 프로필로 요청할 때만 적용되고, 현재 채팅 API는 SillyTavern 설정을 따라요.'),
+        row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수. 요청 비용의 큰 부분이에요.'),
         row('자동 제안', every, '챗마다', '0이면 꺼짐. 메시지가 이만큼 쌓일 때마다 AI가 알아서 변경안을 제안해요 (스와이프는 안 셈).'),
         row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
         el('h4', '', '추가 지시'),
@@ -846,7 +909,7 @@ function buildSetup() {
         profile.value = s.profileId;
         if (profile.value !== s.profileId) profile.value = '';
         profileHint.textContent = list.length ? '월드인포 작업에만 다른 모델을 쓰고 싶을 때 연결 프로필을 고르세요.' : '연결 프로필이 없어요. SillyTavern의 연결 관리자(Connection Profiles)에서 만들 수 있어요.';
-        turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
+        thinking.value = s.thinking; turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
         if (document.activeElement !== prompt) prompt.value = s.customPrompt;
     };
     profile.addEventListener('focus', fillSetup);
@@ -925,7 +988,7 @@ export function onEnable() {
         generation = null; result = { chat: '', phase: 'unknown', entries: [] };
         allEntries = []; allChat = ''; allError = ''; allToken++; fileOn.clear();
         if (aiBusy) cancelAi();
-        aiError = '';
+        aiError = ''; aiTargets.clear();
         closeDialog(); scheduleRefresh();
     });
     for (const name of ['WORLDINFO_UPDATED', 'WORLDINFO_SETTINGS_UPDATED', 'CHARACTER_EDITED']) listen(event_types[name], scheduleRefresh);

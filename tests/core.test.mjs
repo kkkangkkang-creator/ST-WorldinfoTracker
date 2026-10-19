@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import {
     keyMatches, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
-    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff,
+    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits,
 } from '../core.mjs';
 
 const globals = { depth: 2, caseSensitive: false, matchWholeWords: false };
@@ -111,15 +111,16 @@ test('AI details: entries named in the request first, then active ones, within b
     assert.deepEqual(picked.map(e => e.uid), [2, 1], 'named first, Big skipped for budget');
 });
 
-test('AI details: a request naming nothing still gets the ON entries, constant first', () => {
+test('AI details: a request naming nothing falls back to ON constant entries only', () => {
     // "2층 클리어까지 남은 시간 계산해서 다시 입력해줘" names no title or key, and nothing was captured this session.
     const entries = [
         { world: 'AU', uid: 0, comment: '성좌 헌터물', key: [], constant: true, disable: true, content: 'world' },
         { world: 'AU', uid: 5, comment: '탑 내부', key: ['tower'], constant: false, disable: false, content: 'inside' },
         { world: 'AU', uid: 2, comment: '헌터물 기본 설정 보강', key: [], constant: true, disable: false, content: 'two weeks' },
     ];
-    assert.deepEqual(pickDetails(entries, { request: '2층 클리어까지 남은 시간 계산해서 다시 입력해줘' }).map(e => e.uid), [2, 5]);
-    assert.deepEqual(pickDetails(entries, { request: '성좌 헌터물 고쳐줘' }).map(e => e.uid), [0, 2, 5], 'OFF entries only when named');
+    assert.deepEqual(pickDetails(entries, { request: '2층 클리어까지 남은 시간 계산해서 다시 입력해줘' }).map(e => e.uid), [2]);
+    assert.deepEqual(pickDetails(entries, { request: '성좌 헌터물 고쳐줘' }).map(e => e.uid), [0], 'named entries replace the fallback');
+    assert.deepEqual(pickDetails(entries, { request: 'x', targets: new Set([entryKey('AU', 5)]) }).map(e => e.uid), [5], 'picked targets only');
 });
 
 test('AI messages carry the list, details, chat and request', () => {
@@ -142,7 +143,7 @@ test('AI replies are parsed leniently and validated', () => {
         '{"action":"update","world":"AU","uid":2,"content":"9 days"},{"action":"delete","content":"x"},{"action":"create","content":"  "}]}\n```';
     const list = parseProposals(reply);
     assert.equal(list.length, 2);
-    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', reason: '요청' });
+    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', edits: [], reason: '요청' });
     assert.equal(list[1].world, 'AU');
     assert.equal(list[1].uid, 2);
     assert.throws(() => parseProposals('no json here'), /JSON을 찾지/);
@@ -159,4 +160,14 @@ test('extra instructions are appended to the system prompt', () => {
     const [system] = buildAiMessages({ request: 'x', entries: [], details: [], extra: '  한국어로  ' });
     assert.match(system.content, /Additional instructions from the user[^\n]*\n한국어로$/);
     assert.doesNotMatch(buildAiMessages({ request: 'x', entries: [], details: [] })[0].content, /Additional/);
+});
+
+test('updates as find/replace edits', () => {
+    const [p] = parseProposals('{"proposals":[{"action":"update","world":"AU","uid":2,"edits":[{"find":"two weeks","replace":"12 days"},{"find":"","replace":"x"}],"reason":"r"}]}');
+    assert.equal(p.content, null);
+    assert.deepEqual(p.edits, [{ find: 'two weeks', replace: '12 days' }]);
+    assert.deepEqual(applyEdits('Around two weeks remain. roughly two weeks remaining.', p.edits),
+        { content: 'Around 12 days remain. roughly 12 days remaining.', missing: [] });
+    assert.deepEqual(applyEdits('abc', [{ find: 'zzz', replace: 'y' }]).missing, ['zzz']);
+    assert.deepEqual(parseProposals('{"proposals":[{"action":"update","world":"AU","uid":2,"edits":[]}]}'), [], 'an update with nothing to do is dropped');
 });

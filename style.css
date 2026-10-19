@@ -112,3 +112,12 @@ dialog.wit-dialog .wit-settings-row input { width:68px; flex:none; text-align:ri
 .wit-setup > small { font-size:11px; }
 .wit-raw { margin:0 0 10px; font-size:11px; color:var(--wit-muted); }
 .wit-raw summary { cursor:pointer; margin-bottom:4px; }
+.wit-targets { display:flex; flex-wrap:wrap; align-items:center; gap:4px 6px; font-size:12px; }
+.wit-target-auto { color:var(--wit-muted); font-size:11px; }
+.wit-panel .wit-target { min-height:26px; padding:2px 8px; font-size:11px; background:var(--wit-key); color:#2f4566; border-radius:12px; }
+.wit-panel .wit-targets .wit-quiet { min-height:26px; padding:2px 8px; font-size:11px; }
+.wit-pick-list { display:flex; flex-direction:column; overflow-y:auto; min-height:0; }
+.wit-pick { display:flex; align-items:center; gap:8px; padding:7px 2px; border-bottom:1px solid var(--wit-line); font-size:13px; cursor:pointer; }
+.wit-pick input { width:18px; height:18px; margin:0; flex:none; accent-color:var(--wit-accent); }
+.wit-pick span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.wit-pick small { flex:none; font-size:11px; }
