@@ -157,6 +157,7 @@ export function countOccurrences(text, needle) {
 
 // ---------- AI ----------
 export const AI_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. The user asks you to add or update entries.
+The user is talking to you, the lorebook maintainer, not to the roleplay: every request is about the lorebook. "Enter", "write", "put in", "update" or "recalculate" X means change the lorebook so it holds X (e.g. recompute a timer from the current in-story date in RECENT CHAT and write the result into the entry).
 
 Reply with JSON only, no other text, in exactly this shape:
 {"proposals":[
@@ -176,16 +177,23 @@ Rules:
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 /**
- * Picks entries whose full text goes to the AI: those named by the request first, then
- * the ones active in the last reply, within a character budget.
+ * Picks entries whose full text goes to the AI, within a character budget, in this order:
+ * named in the request, active in the last reply, ON constant entries (always in the
+ * prompt anyway), other ON entries. OFF entries go in only when named.
  */
-export function pickDetails(entries, { request = '', activeKeys = new Set(), budget = 24000, globals = { caseSensitive: false, matchWholeWords: false } } = {}) {
+export function pickDetails(entries, { request = '', activeKeys = new Set(), budget = 40000, globals = { caseSensitive: false, matchWholeWords: false } } = {}) {
     const named = e => {
         const title = String(e.comment || '').trim();
         if (title && request.toLowerCase().includes(title.toLowerCase())) return true;
         return keyList(e.key).some(k => keyMatches(request, k, e, globals));
     };
-    const ranked = [...entries.filter(named), ...entries.filter(e => activeKeys.has(entryKey(e.world, e.uid)))];
+    const on = entries.filter(e => !e.disable);
+    const ranked = [
+        ...entries.filter(named),
+        ...entries.filter(e => activeKeys.has(entryKey(e.world, e.uid))),
+        ...on.filter(e => e.constant),
+        ...on.filter(e => !e.constant),
+    ];
     const picked = [], seen = new Set();
     let used = 0;
     for (const e of ranked) {
@@ -220,7 +228,9 @@ export function recentChatLines(chat, turns, maxChars = 2000) {
 export function parseProposals(text) {
     const raw = String(text ?? '').replace(/```(?:json)?/gi, '');
     const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
-    if (start < 0 || end <= start) throw new Error('AI 응답에서 JSON을 찾지 못했어요.');
+    if (start < 0 || end <= start) {
+        throw new Error('AI 응답에서 JSON을 찾지 못했어요. 응답이 중간에 잘렸을 수 있어요. 생각(추론)하는 모델은 생각에도 토큰을 써서, 설정 탭의 최대 토큰을 늘리면 해결될 때가 많아요.');
+    }
     let data;
     try { data = JSON.parse(raw.slice(start, end + 1)); } catch { throw new Error('AI 응답의 JSON 형식이 깨져 있어요.'); }
     const list = Array.isArray(data) ? data : data?.proposals;

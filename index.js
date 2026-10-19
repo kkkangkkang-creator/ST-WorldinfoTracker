@@ -36,7 +36,12 @@ function settings() {
     c.extensionSettings[KEY].showIcon ??= true;
     c.extensionSettings[KEY].profileId ??= '';
     c.extensionSettings[KEY].chatTurns ??= 10;
-    c.extensionSettings[KEY].maxTokens ??= 4096;
+    c.extensionSettings[KEY].maxTokens ??= 16384;
+    // 0.3.0 defaulted to 4096, too small once a thinking model spends tokens on reasoning.
+    if (!c.extensionSettings[KEY].tokensMigrated) {
+        if (c.extensionSettings[KEY].maxTokens === 4096) c.extensionSettings[KEY].maxTokens = 16384;
+        c.extensionSettings[KEY].tokensMigrated = true;
+    }
     c.extensionSettings[KEY].autoEvery ??= 0;
     c.extensionSettings[KEY].customPrompt ??= '';
     return c.extensionSettings[KEY];
@@ -360,7 +365,7 @@ async function openEditor(item, options = {}) {
 }
 
 // ---------- AI ----------
-let aiBusy = false, aiAbort = null, aiError = '';
+let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '';
 // Older builds don't expose the profile service on getContext(); shared.js always has it.
 let sharedServices = null;
 async function loadSharedServices() {
@@ -402,7 +407,7 @@ async function askAi({ auto = false } = {}) {
     if (isGenerating()) { if (!auto) notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
     if (aiBusy) return;
     const controller = new AbortController();
-    aiBusy = true; aiAbort = controller; aiError = ''; render();
+    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = ''; render();
     try {
         const entries = await getSortedEntries();
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
@@ -412,6 +417,7 @@ async function askAi({ auto = false } = {}) {
         const messages = buildAiMessages({ request, entries, details, chatLines, extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
+        aiRaw = text;
         const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
         const time = Date.now(), ready = [];
         let dropped = 0;
@@ -547,7 +553,14 @@ function renderAi() {
     aiSend.textContent = aiBusy ? '취소' : '보내기';
     aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
     if (aiBusy) body.append(el('p', 'wit-note', 'AI가 엔트리를 살펴보는 중…'));
-    if (aiError) body.append(el('p', 'wit-error', aiError));
+    if (aiError) {
+        body.append(el('p', 'wit-error', aiError));
+        if (aiRaw.trim()) {
+            const raw = el('details', 'wit-raw');
+            raw.append(el('summary', '', 'AI 응답 원문 보기'), el('pre', 'wit-preview', aiRaw));
+            body.append(raw);
+        }
+    }
     const proposals = chatState().proposals;
     if (!proposals.length && !aiBusy && !aiError) {
         body.append(el('p', 'wit-empty', 'AI 제안은 바로 저장되지 않아요.\n확인하고 적용할 것만 고르면 돼요.'));
@@ -805,7 +818,7 @@ function buildSetup() {
         });
         return input;
     };
-    const turns = number('chatTurns', 0, 100), every = number('autoEvery', 0, 200), tokens = number('maxTokens', 256, 32000);
+    const turns = number('chatTurns', 0, 100), every = number('autoEvery', 0, 200), tokens = number('maxTokens', 256, 65536);
     const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 5;
     prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
     prompt.addEventListener('input', () => { settings().customPrompt = prompt.value; context().saveSettingsDebounced(); });
@@ -822,7 +835,7 @@ function buildSetup() {
         row('연결', profile, '', profileHint),
         row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수'),
         row('자동 제안', every, '챗마다', '0이면 꺼짐. 메시지가 이만큼 쌓일 때마다 AI가 알아서 변경안을 제안해요 (스와이프는 안 셈).'),
-        row('최대 토큰', tokens, '', 'AI 응답 길이 한도'),
+        row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
         el('h4', '', '추가 지시'),
         prompt,
         el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요.'),

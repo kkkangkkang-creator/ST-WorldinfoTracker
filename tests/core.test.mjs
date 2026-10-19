@@ -111,6 +111,17 @@ test('AI details: entries named in the request first, then active ones, within b
     assert.deepEqual(picked.map(e => e.uid), [2, 1], 'named first, Big skipped for budget');
 });
 
+test('AI details: a request naming nothing still gets the ON entries, constant first', () => {
+    // "2층 클리어까지 남은 시간 계산해서 다시 입력해줘" names no title or key, and nothing was captured this session.
+    const entries = [
+        { world: 'AU', uid: 0, comment: '성좌 헌터물', key: [], constant: true, disable: true, content: 'world' },
+        { world: 'AU', uid: 5, comment: '탑 내부', key: ['tower'], constant: false, disable: false, content: 'inside' },
+        { world: 'AU', uid: 2, comment: '헌터물 기본 설정 보강', key: [], constant: true, disable: false, content: 'two weeks' },
+    ];
+    assert.deepEqual(pickDetails(entries, { request: '2층 클리어까지 남은 시간 계산해서 다시 입력해줘' }).map(e => e.uid), [2, 5]);
+    assert.deepEqual(pickDetails(entries, { request: '성좌 헌터물 고쳐줘' }).map(e => e.uid), [0, 2, 5], 'OFF entries only when named');
+});
+
 test('AI messages carry the list, details, chat and request', () => {
     const [system, user] = buildAiMessages({
         request: '균열 추가해줘',
