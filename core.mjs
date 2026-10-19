@@ -90,6 +90,27 @@ export function applyReplacements(payload, replaced) {
     return removed;
 }
 
+/**
+ * Chat-only ON/OFF: toggles maps entryKey -> true (on) / false (off). Entries are
+ * cloned, never edited, so ST's cached book data stays untouched. Splices in place.
+ */
+export function applyToggles(payload, toggles) {
+    if (!payload || !toggles || !Object.keys(toggles).length) return 0;
+    let changed = 0;
+    for (const k of ['globalLore', 'characterLore', 'chatLore', 'personaLore']) {
+        const list = payload[k];
+        if (!Array.isArray(list)) continue;
+        const next = list.map(entry => {
+            const on = toggles[entryKey(entry.world, entry.uid)];
+            if (typeof on !== 'boolean' || on === !entry.disable) return entry;
+            changed++;
+            return { ...entry, disable: !on };
+        });
+        list.splice(0, list.length, ...next);
+    }
+    return changed;
+}
+
 export function freeUid(data) {
     const entries = data?.entries || {};
     for (let uid = 0; uid < 1_000_000; uid++) if (!(uid in entries)) return uid;

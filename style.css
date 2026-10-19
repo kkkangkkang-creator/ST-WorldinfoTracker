@@ -26,15 +26,17 @@ dialog.wit-dialog textarea.wit-content { flex:1 1 auto; min-height:160px; line-h
 .wit-note { margin:0 0 6px; font-size:11px; color:var(--wit-muted); }
 .wit-section { display:flex; flex-direction:column; margin-bottom:10px; }
 .wit-section h4 { font-size:12px; margin:6px 0 2px; color:var(--wit-accent); overflow-wrap:anywhere; }
-.wit-panel button.wit-row { display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:transparent; border:0; border-bottom:1px solid var(--wit-line); border-radius:0; padding:6px 2px; }
+.wit-row { display:flex; align-items:center; gap:6px; border-bottom:1px solid var(--wit-line); }
+.wit-panel button.wit-row-main { display:flex; align-items:center; gap:8px; flex:1; min-width:0; text-align:left; background:transparent; border:0; border-radius:0; padding:6px 2px; }
+.wit-panel .wit-switch { flex:none; min-width:46px; min-height:32px; padding:4px 7px; font-size:11px; font-weight:700; background:#f1f2ee; color:#656e64; border:1px solid #d7dcd4; }
+.wit-panel .wit-switch.is-on { background:var(--wit-accent); color:#ffffff; border-color:var(--wit-accent); }
+.wit-panel .wit-switch.is-chat { box-shadow:0 0 0 2px #e9b949; }
 .wit-mode { flex:none; font-size:13px; }
 .wit-copy { flex:1; min-width:0; }
 .wit-copy strong { display:block; font-size:13px; font-weight:600; overflow-wrap:anywhere; }
 .wit-why { display:block; margin-top:2px; font-size:11px; color:var(--wit-muted); overflow-wrap:anywhere; }
 .wit-key { display:inline-block; background:var(--wit-key); color:#2f4566; border-radius:5px; padding:0 5px; margin:1px 3px 1px 0; font-weight:600; }
-.wit-tags { display:flex; flex:none; gap:3px; }
-.wit-tag { font-size:10px; border:1px solid var(--wit-line); border-radius:5px; padding:1px 5px; color:var(--wit-accent); }
-.wit-tag.is-off { color:var(--wit-muted); }
+.wit-tag { flex:none; font-size:10px; border:1px solid var(--wit-line); border-radius:5px; padding:1px 5px; color:var(--wit-accent); }
 .wit-empty { text-align:center; color:var(--wit-muted); padding:22px 8px; font-size:12px; }
 .wit-error { border:1px solid #e1b5a8; color:#8e3c27; padding:10px; border-radius:8px; font-size:12px; }
 .wit-status { border-top:1px solid var(--wit-line); padding-top:6px; color:var(--wit-muted); font-size:10px; min-height:14px; }

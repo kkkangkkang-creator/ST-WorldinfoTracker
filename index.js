@@ -4,7 +4,7 @@ import {
     world_info_depth, world_info_case_sensitive, world_info_match_whole_words, world_info_include_names, world_info_recursive,
 } from '../../../world-info.js';
 import {
-    KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements,
+    KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
@@ -22,6 +22,7 @@ let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachD
 let tab = 'active', search = '', busy = false;
 let generation = null, result = { chat: '', phase: 'unknown', entries: [] };
 let allEntries = [], allChat = '', allError = '', allToken = 0, refreshTimer;
+const fileOn = new Map();
 let savedPosition = null, previewPosition = null, floatingSize = DEFAULT_SIZE;
 try { floatingSize = readSize(globalThis.localStorage); } catch {}
 try { savedPosition = readPosition(globalThis.localStorage); } catch {}
@@ -43,8 +44,11 @@ function chatKey() {
     return JSON.stringify([...owner, id]);
 }
 function chatState() {
-    const replaced = context().chatMetadata?.[KEY]?.replaced;
-    return { replaced: Array.isArray(replaced) ? replaced.filter(r => r && r.world && r.book && r.uid != null && r.copyUid != null) : [] };
+    const saved = context().chatMetadata?.[KEY] || {};
+    const replaced = Array.isArray(saved.replaced) ? saved.replaced.filter(r => r && r.world && r.book && r.uid != null && r.copyUid != null) : [];
+    const toggles = {};
+    for (const [k, v] of Object.entries(saved.toggles || {})) if (typeof v === 'boolean') toggles[k] = v;
+    return { replaced, toggles };
 }
 async function writeChatState(update, key) {
     const c = context();
@@ -356,7 +360,22 @@ function whyLine(entry) {
     line.textContent = why.mode === 'vectorized' ? '벡터 검색으로 활성' : '키워드를 채팅에서 못 찾음 (스티키·확률·외부 활성 등)';
     return line;
 }
+function isOn(entry, toggles) {
+    const on = toggles[entryKey(entry.world, entry.uid)];
+    return typeof on === 'boolean' ? on : (fileOn.get(entryKey(entry.world, entry.uid)) ?? !entry.disable);
+}
+async function toggleEntry(entry) {
+    const key = chatKey();
+    if (!guard(key)) return;
+    const k = entryKey(entry.world, entry.uid), next = !isOn(entry, chatState().toggles);
+    await run(() => writeChatState(s => {
+        // Back to the book's own state means no override is needed.
+        if (fileOn.has(k) && fileOn.get(k) === next) delete s.toggles[k]; else s.toggles[k] = next;
+    }, key));
+    scheduleRefresh();
+}
 function renderEntries(list) {
+    const toggles = chatState().toggles;
     const book = chatBook(), query = search.trim().toLocaleLowerCase();
     const groups = new Map();
     for (const entry of list) {
@@ -373,16 +392,20 @@ function renderEntries(list) {
         section.append(el('h4', '', world === book ? `📗 이 방 전용 · ${world}` : `📘 ${world}`));
         for (const entry of groups.get(world)) {
             const mode = entry.why?.mode ?? (entry.constant ? 'constant' : entry.vectorized ? 'vectorized' : 'keyword');
-            const row = button('', () => openEditor(entry), 'wit-row', `${entryTitle(entry)} 수정`);
+            const row = el('div', 'wit-row');
+            const main = button('', () => openEditor(entry), 'wit-row-main', `${entryTitle(entry)} 수정`);
             const icon = el('span', 'wit-mode', modeIcons[mode]); icon.title = modeLabels[mode];
             const copy = el('span', 'wit-copy');
             copy.append(el('strong', '', entryTitle(entry)), whyLine(entry));
-            row.append(icon, copy);
-            const tags = el('span', 'wit-tags');
-            if (world === book && replacementOf(world, entry.uid)) tags.append(el('span', 'wit-tag', '수정본'));
-            if (entry.disable) tags.append(el('span', 'wit-tag is-off', '꺼짐'));
-            if (tags.childNodes.length) row.append(tags);
-            row.disabled = busy;
+            main.append(icon, copy);
+            if (world === book && replacementOf(world, entry.uid)) main.append(el('span', 'wit-tag', '수정본'));
+            main.disabled = busy;
+            const on = isOn(entry, toggles), overridden = typeof toggles[entryKey(world, entry.uid)] === 'boolean';
+            const toggle = button(on ? 'ON' : 'OFF', () => toggleEntry(entry), `wit-switch${on ? ' is-on' : ''}${overridden ? ' is-chat' : ''}`,
+                `${entryTitle(entry)} · 이 채팅에서 ${on ? '끄기' : '켜기'}${overridden ? ' (이 채팅에서 바꾼 상태)' : ''}`);
+            toggle.setAttribute('role', 'switch'); toggle.setAttribute('aria-checked', String(on));
+            toggle.disabled = busy;
+            row.append(main, toggle);
             section.append(row);
         }
         body.append(section);
@@ -392,14 +415,14 @@ function renderActive() {
     if (!hasActivationHook) { body.append(el('p', 'wit-empty', '이 SillyTavern 버전은 활성화 조회를 지원하지 않아요.')); return; }
     const known = result.chat === chatKey() && result.phase === 'ready';
     if (!known) { body.append(el('p', 'wit-empty', result.phase === 'pending' && result.chat === chatKey() ? '활성화 확인 중…' : '응답을 한 번 생성하면 여기에 보여요.')); return; }
-    body.append(el('p', 'wit-note', `이번 응답에 들어간 엔트리 ${result.entries.length}개 · 일치 키워드는 추정이에요`));
+    body.append(el('p', 'wit-note', `이번 응답에 들어간 엔트리 ${result.entries.length}개 · 키워드는 추정 · ON/OFF는 이 채팅만, 다음 응답부터`));
     if (!result.entries.length) { body.append(el('p', 'wit-empty', '활성화된 엔트리가 없어요.')); return; }
     renderEntries(result.entries);
 }
 function renderAll() {
     if (allError) { body.append(el('p', 'wit-error', allError)); return; }
     if (allChat !== chatKey()) { body.append(el('p', 'wit-empty', '불러오는 중…')); return; }
-    body.append(el('p', 'wit-note', `이 채팅에 연결된 엔트리 ${allEntries.length}개`));
+    body.append(el('p', 'wit-note', `이 채팅에 연결된 엔트리 ${allEntries.length}개 · ON/OFF는 이 채팅만`));
     renderEntries(allEntries);
 }
 function render() {
@@ -576,8 +599,11 @@ export function onEnable() {
     globalThis.addEventListener?.('resize', showFloatingIcon);
     globalThis.visualViewport?.addEventListener('resize', showFloatingIcon);
     listen(event_types.WORLDINFO_ENTRIES_LOADED, payload => {
-        // Hide shared entries that this chat replaced with its own copy.
-        applyReplacements(payload, chatState().replaced);
+        const state = chatState();
+        for (const list of Object.values(payload)) if (Array.isArray(list)) for (const e of list) fileOn.set(entryKey(e.world, e.uid), !e.disable);
+        // Hide shared entries that this chat replaced with its own copy, then apply this chat's ON/OFF.
+        applyReplacements(payload, state.replaced);
+        applyToggles(payload, state.toggles);
     });
     listen(event_types.GENERATION_AFTER_COMMANDS, (type, _options, dryRun) => {
         if (dryRun || type === 'quiet' || !chatKey()) return;
@@ -600,7 +626,7 @@ export function onEnable() {
     });
     listen(event_types.CHAT_CHANGED, () => {
         generation = null; result = { chat: '', phase: 'unknown', entries: [] };
-        allEntries = []; allChat = ''; allError = ''; allToken++;
+        allEntries = []; allChat = ''; allError = ''; allToken++; fileOn.clear();
         closeDialog(); scheduleRefresh();
     });
     for (const name of ['WORLDINFO_UPDATED', 'WORLDINFO_SETTINGS_UPDATED', 'CHARACTER_EDITED']) listen(event_types[name], scheduleRefresh);

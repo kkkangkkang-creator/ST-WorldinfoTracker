@@ -175,7 +175,27 @@ window.chats = chats; window.store = store;
     assert.equal(state.books.AU.entries[5].content, 'Inside the tower (edited)');
     assert.equal(state.backups.length, 1);
 
-    // 8. Generating blocks saves.
+    // 8. Chat-only ON/OFF: chat B turns "탑 내부" off; chat A keeps it on; toggling back clears the override.
+    await page.click('.wit-dialog button >> text=닫기').catch(() => {});
+    const sortedOf = () => page.evaluate(async () => (await import('/scripts/world-info.js')).getSortedEntries().then(l => Object.fromEntries(l.map(e => [`${e.world}#${e.uid}`, !e.disable]))));
+    await sortedOf(); // records the books' own ON/OFF
+    await page.click('.wit-row:has-text("탑 내부") .wit-switch');
+    await page.waitForSelector('.wit-row:has-text("탑 내부") .wit-switch.is-chat >> text=OFF');
+    assert.deepEqual(await page.evaluate(() => window.chats.B.worldinfo_tracker.toggles), { '["AU","5"]': false });
+    assert.equal((await sortedOf())['AU#5'], false);
+    assert.equal(await page.evaluate(() => window.books.AU.entries[5].disable), false, 'book file untouched');
+    await page.click('.wit-row:has-text("탑 내부") .wit-switch');
+    await page.waitForSelector('.wit-row:has-text("탑 내부") .wit-switch.is-on:not(.is-chat)');
+    assert.deepEqual(await page.evaluate(() => window.chats.B.worldinfo_tracker.toggles), {});
+    await page.click('.wit-row:has-text("헌터물 기본 설정 보강") .wit-switch');
+    await page.waitForSelector('.wit-row:has-text("헌터물 기본 설정 보강") .wit-switch.is-on');
+    assert.equal((await sortedOf())['AU#2'], true);
+    if (shots) await page.screenshot({ path: path.join(shots, '6-toggles.png') });
+    await page.evaluate(async () => { window.currentChat = 'A'; await window.eventSource.emit('CHAT_CHANGED'); });
+    assert.equal((await sortedOf())['AU#5'], true);
+    await page.evaluate(async () => { window.currentChat = 'B'; await window.eventSource.emit('CHAT_CHANGED'); });
+
+    // 9. Generating blocks saves.
     await page.click('.wit-row >> text=탑 내부');
     await page.evaluate(() => { window.busy = true; });
     await page.click('.wit-dialog button >> text=공용 책에 저장');

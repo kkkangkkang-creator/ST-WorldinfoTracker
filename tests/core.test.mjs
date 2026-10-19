@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
-    keyMatches, scanMessages, explainEntry, recursionText, applyReplacements,
+    keyMatches, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
 } from '../core.mjs';
 
@@ -87,4 +87,15 @@ test('keys round-trip through the text field', () => {
     assert.deepEqual(parseKeys('a\nb'), ['a', 'b']);
     assert.equal(countOccurrences('two weeks ... two weeks', 'two weeks'), 2);
     assert.equal(entryKey('AU', 2), entryKey('AU', '2'));
+});
+
+test('chat toggles clone entries with the chosen ON/OFF', () => {
+    const original = { world: 'AU', uid: 2, disable: true };
+    const payload = { globalLore: [original, { world: 'AU', uid: 5, disable: false }], chatLore: [] };
+    const keep = payload.globalLore;
+    assert.equal(applyToggles(payload, { [entryKey('AU', 2)]: true, [entryKey('AU', 5)]: true }), 1);
+    assert.equal(payload.globalLore, keep);
+    assert.equal(payload.globalLore[0].disable, false);
+    assert.equal(original.disable, true, 'cached entry untouched');
+    assert.equal(applyToggles(payload, {}), 0);
 });
