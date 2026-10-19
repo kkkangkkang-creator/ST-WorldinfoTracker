@@ -108,7 +108,7 @@ dialog.wit-dialog .wit-settings-row input { width:68px; flex:none; text-align:ri
 .wit-setup-label { flex:0 0 68px; color:var(--wit-muted); }
 .wit-panel .wit-setup select,.wit-panel .wit-setup input { flex:1; min-width:0; margin:0; background:#ffffff!important; color:var(--wit-text)!important; border:1px solid var(--wit-line)!important; border-radius:8px; padding:6px 9px; font-size:13px; font-family:inherit; box-shadow:none; }
 .wit-panel .wit-setup input[type=number] { flex:0 0 84px; text-align:right; }
-.wit-panel textarea.wit-setup-prompt { width:100%; resize:vertical; min-height:96px; margin:0; background:#ffffff!important; color:var(--wit-text)!important; border:1px solid var(--wit-line)!important; border-radius:9px; padding:7px 9px; font-size:13px; line-height:1.45; font-family:inherit; box-shadow:none; }
+.wit-panel textarea.wit-setup-prompt { width:100%; resize:vertical; min-height:150px; margin:0; background:#ffffff!important; color:var(--wit-text)!important; border:1px solid var(--wit-line)!important; border-radius:9px; padding:7px 9px; font-size:13px; line-height:1.45; font-family:inherit; box-shadow:none; }
 .wit-setup > small { font-size:11px; }
 .wit-raw { margin:0 0 10px; font-size:11px; color:var(--wit-muted); }
 .wit-raw summary { cursor:pointer; margin-bottom:4px; }

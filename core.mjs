@@ -176,8 +176,16 @@ const VARIABLE_RULES = `Variables: values that change as the story goes on (date
 - Top-level "vars" sets variables already listed under CURRENT VALUES (exact names only). Never invent a variable there, and never write such a value into entry text.
 - To turn a changing value inside an entry into a variable: in that entry's "update", replace the value in "edits" with {{getvar::name}} and list the variable in that update's "vars" with its current value. Prefer an absolute date over a countdown when the chat shows today's date.`;
 
-// Short on purpose: it is sent with every request. The long form is for the roleplay preset.
-export const WRITING_RULES = `Naming and concepts: prefer concrete, recognizable concepts over abstract or elaborate inventions, and default to familiar genre conventions. Give new elements a clear identity (what it is, what it does, its limits). Name things plainly and descriptively, not with ornate mystical, cosmic or philosophical titles, and do not stack grandiose adjectives or invented terms. Originality comes from distinctive behavior and limits, not obscurity. Do not make ordinary things extraordinary just to add mystery or importance.`;
+// Pre-filled into the "추가 지시" setting once; the user can edit or delete it.
+export const DEFAULT_EXTRA_PROMPT = `## Concrete Concepts & Naming
+
+- Prefer concrete, recognizable concepts over abstract, symbolic, or elaborate inventions. A reader should be able to picture what something is and grasp what it does.
+- For creatures, abilities, items, and phenomena, default to familiar genre conventions unless the setting calls for something else.
+- Give every new element a clear identity: what it looks like, what it does, and where its limits or costs lie.
+- Name things plainly and descriptively (e.g., "Iron Golem", "Frost Wolf", "Healing"). Avoid ornate titles built from mystical, cosmic, or philosophical terms (e.g., "Eternal Void-Flame Sovereign of Severed Fate"), and don't stack grandiose adjectives or invented terminology.
+- Originality comes from distinctive behavior, uses, limits, and circumstances, never from obscurity or novelty for its own sake.
+- Abstract or unusual concepts are fine when the established setting, a character, or the story genuinely calls for them.
+- Do not turn ordinary things into extraordinary ones just to create mystery, grandeur, or importance.`;
 
 export const AI_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. The user asks you to add or update entries.
 The user is talking to you, the lorebook maintainer, not to the roleplay: every request is about the lorebook. "Enter", "write", "put in", "update" or "recalculate" X means change the lorebook so it holds X (e.g. recompute a timer from the current in-story date in RECENT CHAT and set the result).
@@ -188,9 +196,7 @@ Rules:
 ${ENTRY_RULES}
 - If nothing should change, return {"vars":[],"proposals":[]}.
 
-${VARIABLE_RULES}
-
-${WRITING_RULES}`;
+${VARIABLE_RULES}`;
 
 export const TRACK_SYSTEM_PROMPT = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. Read NEW CHAT and report only lasting changes the lorebook should reflect. Nobody is talking to you: answer with the JSON only.
 
@@ -205,9 +211,7 @@ Prefer nothing over noise. If nothing qualifies, return {"vars":[],"proposals":[
 Rules:
 ${ENTRY_RULES}
 
-${VARIABLE_RULES}
-
-${WRITING_RULES}`;
+${VARIABLE_RULES}`;
 
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
 

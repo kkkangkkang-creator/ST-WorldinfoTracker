@@ -7,7 +7,7 @@ import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
     pickDetails, buildAiMessages, buildTrackMessages, recentChatLines, parseAiResult, lineDiff, applyEdits,
-    validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
+    DEFAULT_EXTRA_PROMPT, validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -54,6 +54,12 @@ function settings() {
     c.extensionSettings[KEY].autoEvery ??= 30;
     c.extensionSettings[KEY].trackTags ??= 'Status';
     c.extensionSettings[KEY].customPrompt ??= '';
+    // One-time: put the naming rule into the user's own instructions (kept if they already have some).
+    if (!c.extensionSettings[KEY].namingSeeded) {
+        const own = String(c.extensionSettings[KEY].customPrompt).trim();
+        if (!own.includes('Concrete Concepts & Naming')) c.extensionSettings[KEY].customPrompt = own ? `${own}\n\n${DEFAULT_EXTRA_PROMPT}` : DEFAULT_EXTRA_PROMPT;
+        c.extensionSettings[KEY].namingSeeded = true;
+    }
     c.extensionSettings[KEY].thinking ??= 'min';
     return c.extensionSettings[KEY];
 }
@@ -557,8 +563,15 @@ async function trackChat({ manual = false } = {}) {
         try { await setBookmarkToEnd(key); } catch (error) { console.warn('[WorldInfo Tracker]', error); }
         return render();
     }
-    const range = pickRange(chat, at, { every: s.autoEvery, hold: HOLD_TURNS, force: manual });
-    if (!range) return say('새로 읽을 대화가 없어요.');
+    let range = pickRange(chat, at, { every: s.autoEvery, hold: HOLD_TURNS, force: manual });
+    if (!range && manual) {
+        // Nothing behind the bookmark (e.g. auto tracking was just switched on): offer the latest turns.
+        range = pickRange(chat, null, { every: s.autoEvery, force: true });
+        if (!range) return say('읽을 대화가 없어요.');
+        const guess = formatLines(range.messages).reduce((n, line) => n + line.length, 0);
+        if (!(await confirmAction('새로 읽을 대화가 없어요', `마지막으로 읽은 곳 이후는 비어 있어요. 최근 ${range.turns}턴(약 ${guess.toLocaleString()}자)을 다시 읽을까요?`))) return;
+    }
+    if (!range) return;
 
     const tags = parseTagList(s.trackTags);
     const lines = thinTagBlocks(formatLines(range.messages), tags);
@@ -760,10 +773,11 @@ function trackBlock() {
     if (!s.autoOn) line = '자동 추적 꺼짐 · 설정 탭에서 켤 수 있어요';
     else if (at === null) line = `자동 추적 · ${s.autoEvery}턴마다 · 다음 응답부터 세요`;
     else {
-        const pending = pendingTurns(chat, at), left = Math.max(0, s.autoEvery + HOLD_TURNS - pending);
-        line = `자동 추적 · ${s.autoEvery}턴마다 · ${pending}턴 쌓임${left ? ` · ${left}턴 뒤 실행` : ' · 곧 실행'}`;
+        const pending = pendingTurns(chat, at), need = s.autoEvery + HOLD_TURNS;
+        line = `자동 추적 · ${s.autoEvery}턴마다 · 쌓인 턴 ${Math.min(pending, need)}/${need}${pending >= need ? ' · 곧 실행' : ''}`;
     }
     const top = el('div', 'wit-track-row');
+    top.title = `${s.autoEvery}턴을 읽으려면 최신 ${HOLD_TURNS}턴이 확정될 때까지 기다려서, ${s.autoEvery + HOLD_TURNS}턴이 쌓이면 실행돼요`;
     const check = button('지금 확인', () => trackChat({ manual: true }), 'wit-quiet', '마지막으로 읽은 곳 이후의 대화를 지금 읽어요');
     check.disabled = aiBusy || busy;
     top.append(el('small', 'wit-muted', line), check);
@@ -1124,7 +1138,7 @@ function buildSetup() {
     });
     const tags = el('input'); tags.placeholder = 'Status'; tags.setAttribute('aria-label', '상태창 태그');
     tags.addEventListener('change', () => { settings().trackTags = tags.value.trim(); save(); });
-    const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 5;
+    const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 8;
     prompt.placeholder = '예: 한국어로 써줘\n예: 캐릭터 엔트리는 ## BASICS 형식을 유지해줘\n예: 타이머·날짜는 꼭 갱신해줘';
     prompt.addEventListener('input', () => { settings().customPrompt = prompt.value; context().saveSettingsDebounced(); });
     const row = (label, input, unit, hint) => {
@@ -1147,7 +1161,7 @@ function buildSetup() {
         row('상태창 태그', tags, '', '메시지마다 반복되는 <Status>…</Status> 같은 블록은 가장 최근 것만 보내서 아껴요. 비우면 끔.'),
         el('h4', '', '추가 지시'),
         prompt,
-        el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요. (이름·개념은 쉽고 구체적으로 짓는 규칙은 기본으로 들어 있어요.)'),
+        el('small', 'wit-muted', 'AI에게 매번 같이 보내는 내 규칙이에요. 기본 지시는 그대로 두고 덧붙여져요. 처음 한 번 이름·개념 규칙이 미리 채워져 있어요. 자유롭게 고치거나 지워도 돼요.'),
     );
     fillSetup = () => {
         const s = settings(), list = profiles();

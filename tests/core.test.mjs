@@ -5,7 +5,7 @@ import {
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
     pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff, applyEdits,
     parseAiResult, validVarName, findVarRefs, isReadable, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines,
-    parseTagList, thinTagBlocks, splitParts, pickTrackDetails, buildTrackMessages, AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT, WRITING_RULES,
+    parseTagList, thinTagBlocks, splitParts, pickTrackDetails, buildTrackMessages, AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT, DEFAULT_EXTRA_PROMPT,
 } from '../core.mjs';
 
 const globals = { depth: 2, caseSensitive: false, matchWholeWords: false };
@@ -295,9 +295,7 @@ test('tracker messages and prompts', () => {
     assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d \| keyword/);
     assert.match(buildTrackMessages({ lines: [], vars: { 새값: '' }, entries: [], details: [] })[1].content, /새값 = \(not set\)/);
     assert.match(user.content, /## NEW CHAT \(oldest first\) - part 2 of 3\n\nLena: hi$/);
-    for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) {
-        assert.ok(prompt.includes(WRITING_RULES));
-        assert.match(prompt, /\{\{getvar::name\}\}/);
-    }
-    assert.ok(WRITING_RULES.length < 800, 'the naming rule stays short: it is sent with every request');
+    for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) assert.match(prompt, /\{\{getvar::name\}\}/);
+    assert.ok(!/Naming and concepts/.test(AI_SYSTEM_PROMPT + TRACK_SYSTEM_PROMPT), 'the naming rule lives in the user instructions, not the built-in prompt');
+    assert.match(DEFAULT_EXTRA_PROMPT, /^## Concrete Concepts & Naming\n\n- Prefer concrete/);
 });

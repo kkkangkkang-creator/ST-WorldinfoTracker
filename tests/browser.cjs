@@ -66,7 +66,7 @@ window.SillyTavern = {
         saveWorldInfo: async (n, d) => { window.books[n] = structuredClone(d); },
         updateWorldInfoList: async () => {}, reloadWorldInfoEditor: () => {},
         getWorldInfoNames: () => Object.keys(window.books),
-        Popup: { show: { confirm: async () => 1 } },
+        Popup: { show: { confirm: async () => (window.confirmAnswer ?? 1) } },
         generateRaw: async ({ prompt }) => { window.aiPrompt = prompt; await new Promise(r => setTimeout(r, 50)); return window.aiReply; },
     }),
 };
@@ -265,6 +265,7 @@ window.chats = chats; window.store = store;
     await page.waitForSelector('.wit-setup:not([hidden])');
     assert.deepEqual(await page.$$eval('.wit-setup select.wit-profile option', o => o.map(x => x.textContent)), ['현재 채팅 API', 'Flash']);
     await page.selectOption('.wit-setup select.wit-profile', 'p1');
+    assert.match(await page.inputValue('.wit-setup-prompt'), /^## Concrete Concepts & Naming/, 'the naming rule is pre-filled once');
     await page.fill('.wit-setup-prompt', '한국어로 써줘');
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.autoOn, s.autoEvery, s.trackTags]; }), [false, 30, 'Status'], 'auto tracking is off by default, every 30 turns');
     const numbers = await page.$$('.wit-setup input[type=number]');
@@ -359,7 +360,7 @@ window.chats = chats; window.store = store;
     await page.click('.wit-tabs button[data-tab=vars]');
     assert.match(await page.textContent('.wit-var:has-text("2층_Break")'), /AI .*2025\/04\/22 → 2025\/05\/01/);
     await page.click('.wit-tabs button[data-tab=ai]');
-    assert.match(await page.textContent('.wit-track'), /자동 추적 · 3턴마다 · 2턴 쌓임 · 3턴 뒤 실행[\s\S]*마지막 확인 방금 · 3턴 읽음 · 값 1개 · 제안 1개/);
+    assert.match(await page.textContent('.wit-track'), /자동 추적 · 3턴마다 · 쌓인 턴 2\/5[\s\S]*마지막 확인 방금 · 3턴 읽음 · 값 1개 · 제안 1개/);
     if (shots) await page.screenshot({ path: path.join(shots, '10-track.png') });
 
     // 14. "지금 확인" reads whatever is behind the bookmark, including the held turns.
@@ -370,11 +371,19 @@ window.chats = chats; window.store = store;
     assert.ok(manual.includes('B lena 1') && !manual.includes('A lena'), 'only what is new');
     await page.waitForFunction(() => window.chats.B.worldinfo_tracker.trackLast.manual === true);
     assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.trackAt), await page.evaluate(() => window.chat.length));
-    // nothing new behind the bookmark: no request goes out
-    await page.evaluate(() => { window.profileCall = null; });
+    // nothing new behind the bookmark: it asks first, and declining sends nothing
+    await page.evaluate(() => { window.profileCall = null; window.confirmAnswer = 0; });
     await page.click('.wit-track button >> text=지금 확인');
     await page.waitForTimeout(600);
     assert.equal(await page.evaluate(() => window.profileCall), null);
+    // accepting reads the latest turns again (here every = 3)
+    await page.evaluate(() => { window.confirmAnswer = 1; });
+    await page.click('.wit-track button >> text=지금 확인');
+    await page.waitForFunction(() => window.profileCall === 'p1');
+    const again = await page.evaluate(() => window.aiPrompt[1].content.split('## NEW CHAT (oldest first)')[1]);
+    assert.ok(again.includes('B lena 1') && again.includes('A lena 2') && !again.includes('A lena 0'), 'the latest 3 turns');
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+    await page.evaluate(() => { window.confirmAnswer = 1; });
 
     // Phone width.
     await page.setViewportSize({ width: 390, height: 760 });
