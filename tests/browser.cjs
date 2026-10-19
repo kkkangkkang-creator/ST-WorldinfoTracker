@@ -100,6 +100,7 @@ window.chats = chats; window.store = store;
         await e.emit('GENERATION_ENDED');
     });
     assert.equal(await page.textContent('.wit-badge'), '2');
+    assert.equal(await page.$eval('.wit-badge', b => getComputedStyle(b).backgroundColor), 'rgb(155, 44, 28)');
     await page.click('#wit-floating-launcher');
     await page.waitForSelector('.wit-row');
     const rows = await page.$$eval('.wit-row', r => r.map(x => x.textContent));
