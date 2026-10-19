@@ -83,9 +83,9 @@ window.chats = chats; window.store = store;
     await page.route('http://st.test/**', route => {
         const url = new URL(route.request().url());
         const body = url.pathname === '/scripts/extensions/shared.js' ? sharedMock : url.pathname === '/' ? page0 : url.pathname === '/script.js' ? scriptMock : url.pathname === '/scripts/world-info.js' ? worldInfoMock
-            : url.pathname.startsWith(prefix) ? fs.readFileSync(path.join(root, url.pathname.slice(prefix.length)), 'utf8') : null;
+            : url.pathname.startsWith(prefix) ? fs.readFileSync(path.join(root, url.pathname.slice(prefix.length)), url.pathname.endsWith('.png') ? null : 'utf8') : null;
         if (body === null) return route.fulfill({ status: 404, body: '' });
-        const type = url.pathname.endsWith('.css') ? 'text/css' : url.pathname === '/' ? 'text/html' : 'text/javascript';
+        const type = url.pathname.endsWith('.png') ? 'image/png' : url.pathname.endsWith('.css') ? 'text/css' : url.pathname === '/' ? 'text/html' : 'text/javascript';
         return route.fulfill({ status: 200, contentType: type, body });
     });
     await page.goto('http://st.test/');
@@ -100,6 +100,7 @@ window.chats = chats; window.store = store;
         await e.emit('GENERATION_ENDED');
     });
     assert.equal(await page.textContent('.wit-badge'), '2');
+    await page.waitForFunction(() => document.querySelector('.wit-launcher-icon')?.naturalWidth === 192);
     assert.equal(await page.$eval('.wit-badge', b => getComputedStyle(b).backgroundColor), 'rgb(155, 44, 28)');
     await page.click('#wit-floating-launcher');
     await page.waitForSelector('.wit-row');

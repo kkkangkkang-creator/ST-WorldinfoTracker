@@ -54,8 +54,9 @@ dialog.wit-dialog textarea.wit-content { flex:1 1 auto; min-height:160px; line-h
 .wit-error { border:1px solid var(--wit-red); background:#fdf3ef; color:var(--wit-red); padding:10px; border-radius:0; font-size:12.5px; }
 .wit-status { border-top:1px solid var(--wit-rule); padding-top:6px; color:var(--wit-muted); font-size:10.5px; min-height:14px; }
 /* The icon lives outside the panel, so the badge spells out its colors instead of using the panel tokens. */
-.wit-badge { position:absolute; top:-2px; right:-2px; min-width:18px; height:18px; padding:0 4px; border-radius:2px; background:#9b2c1c!important; color:#ffffff!important; box-shadow:0 0 0 1.5px #ffffff; font-size:11px; line-height:18px; font-weight:700; text-align:center; pointer-events:none; }
+.wit-badge { position:absolute; top:-7px; right:-9px; min-width:18px; height:18px; padding:0 4px; border-radius:2px; background:#9b2c1c!important; color:#ffffff!important; box-shadow:0 0 0 1.5px #ffffff; font-size:11px; line-height:18px; font-weight:700; text-align:center; pointer-events:none; }
 .wit-badge[hidden] { display:none; }
+.wit-launcher-icon { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; filter:drop-shadow(0 1px 2px rgba(0,0,0,.25)); }
 #wit-floating-launcher::backdrop { background:transparent; pointer-events:none; }
 
 /* Dialog: header and footer stay put; only the middle scrolls, so the save buttons are always visible. */

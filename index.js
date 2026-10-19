@@ -1092,7 +1092,9 @@ function buildUI() {
         launcher.style.setProperty(name, value, 'important');
     }
     badge = el('span', 'wit-badge'); badge.hidden = true; badge.setAttribute('aria-hidden', 'true');
-    launcher.append(el('span', '', '📖'), badge);
+    const icon = el('img', 'wit-launcher-icon');
+    icon.src = new URL('./icon.png', import.meta.url).href; icon.alt = ''; icon.draggable = false;
+    launcher.append(icon, badge);
     launcher.id = 'wit-floating-launcher';
     launcher.setAttribute('aria-expanded', 'false');
     detachDrag = attachFloatingDrag(launcher, {
@@ -1245,7 +1247,7 @@ function buildSettings() {
     actions.append(button('패널 열기', () => setPanelOpen(true), 'menu_button'), button('아이콘 위치 초기화', resetFloatingPosition, 'menu_button'));
     const show = el('input'); show.type = 'checkbox'; show.checked = settings().showIcon;
     show.addEventListener('change', () => { settings().showIcon = show.checked; context().saveSettingsDebounced(); showFloatingIcon(); });
-    const showRow = el('label', 'checkbox_label'); showRow.append(show, el('span', '', '떠 있는 📖 아이콘 표시'));
+    const showRow = el('label', 'checkbox_label'); showRow.append(show, el('span', '', '떠 있는 아이콘 표시'));
     const size = el('input'); size.type = 'range'; size.min = '24'; size.max = '72'; size.step = '1'; size.value = String(floatingSize);
     size.addEventListener('input', () => setFloatingSize(size.value));
     const sizeRow = el('label', 'wit-size', '아이콘 크기'); sizeRow.append(size);
