@@ -6,6 +6,7 @@ import {
 import {
     KEY, entryKey, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
+    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -18,7 +19,7 @@ const modeLabels = { constant: '상시', keyword: '키워드', vectorized: '벡�
 
 let active = false;
 const subscriptions = [];
-let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag;
+let panel, body, status, subtitle, launcher, badge, dialog, searchInput, detachDrag, toolbar, aiBox, aiInput, aiSend, aiMeta;
 let tab = 'active', search = '', busy = false;
 let generation = null, result = { chat: '', phase: 'unknown', entries: [] };
 let allEntries = [], allChat = '', allError = '', allToken = 0, refreshTimer;
@@ -33,6 +34,9 @@ function settings() {
     const c = context();
     c.extensionSettings[KEY] ??= {};
     c.extensionSettings[KEY].showIcon ??= true;
+    c.extensionSettings[KEY].profileId ??= '';
+    c.extensionSettings[KEY].chatTurns ??= 10;
+    c.extensionSettings[KEY].maxTokens ??= 4096;
     return c.extensionSettings[KEY];
 }
 
@@ -48,7 +52,8 @@ function chatState() {
     const replaced = Array.isArray(saved.replaced) ? saved.replaced.filter(r => r && r.world && r.book && r.uid != null && r.copyUid != null) : [];
     const toggles = {};
     for (const [k, v] of Object.entries(saved.toggles || {})) if (typeof v === 'boolean') toggles[k] = v;
-    return { replaced, toggles };
+    const proposals = Array.isArray(saved.proposals) ? saved.proposals.filter(p => p && p.id && typeof p.content === 'string') : [];
+    return { replaced, toggles, proposals };
 }
 async function writeChatState(update, key) {
     const c = context();
@@ -229,7 +234,8 @@ function entryTitle(entry) {
     return String(entry.comment || formatKeys(entry.key) || `엔트리 ${entry.uid}`);
 }
 
-async function openEditor(item) {
+// options.draft prefills the fields (an AI proposal); options.onSaved runs after a save.
+async function openEditor(item, options = {}) {
     const key = chatKey();
     if (!key) { notify('채팅을 먼저 열어주세요.'); return; }
     const c = context();
@@ -248,7 +254,8 @@ async function openEditor(item) {
     const book = chatBook();
     const inChatBook = !item || item.world === book;
     const rep = item ? replacementOf(item.world, item.uid) : null;
-    const d = modal(item ? '엔트리 수정' : '새 엔트리 · 이 방 전용');
+    const v = { ...(raw ?? {}), ...(options.draft ?? {}) };
+    const d = modal(options.draft ? 'AI 제안 고치기' : item ? '엔트리 수정' : '새 엔트리 · 이 방 전용');
 
     const main = el('div', 'wit-dialog-body');
     const where = el('p', 'wit-where');
@@ -257,13 +264,13 @@ async function openEditor(item) {
     else where.textContent = `현재: 📘 ${item.world} · 공용`;
     main.append(where);
 
-    const title = el('input'); title.value = raw?.comment ?? '';
-    const keys = el('input'); keys.value = formatKeys(raw?.key); keys.placeholder = '쉼표로 구분';
-    const keys2 = el('input'); keys2.value = formatKeys(raw?.keysecondary);
+    const title = el('input'); title.value = v.comment ?? '';
+    const keys = el('input'); keys.value = formatKeys(v.key); keys.placeholder = '쉼표로 구분';
+    const keys2 = el('input'); keys2.value = formatKeys(v.keysecondary);
     main.append(field('제목', title), field('키워드', keys), field('보조', keys2));
 
     // Activation mode, order and probability on one row.
-    let mode = raw?.constant ? 'constant' : raw?.vectorized ? 'vectorized' : 'keyword';
+    let mode = v.constant ? 'constant' : v.vectorized ? 'vectorized' : 'keyword';
     const modes = el('span', 'wit-modes');
     for (const kind of ['constant', 'keyword', 'vectorized']) {
         const b = button(modeIcons[kind], () => { mode = kind; for (const x of modes.children) x.classList.toggle('is-active', x.dataset.mode === mode); }, '', modeLabels[kind]);
@@ -279,7 +286,7 @@ async function openEditor(item) {
     settingsRow.append(modes, orderLabel, probLabel);
     main.append(settingsRow);
 
-    const content = el('textarea', 'wit-content'); content.rows = 10; content.value = raw?.content ?? ''; content.setAttribute('aria-label', '본문');
+    const content = el('textarea', 'wit-content'); content.rows = 10; content.value = v.content ?? ''; content.setAttribute('aria-label', '본문');
     main.append(content);
 
     // Find & replace inside the body, e.g. "two weeks" -> "9 days".
@@ -309,7 +316,12 @@ async function openEditor(item) {
             useProbability: chance < 100 ? true : (raw?.useProbability ?? true),
         };
     };
-    const finish = ok => { if (ok) { closeDialog(); scheduleRefresh(); } };
+    const finish = async ok => {
+        if (!ok) return;
+        closeDialog();
+        try { await options.onSaved?.(); } catch (error) { notify(error.message, true); }
+        scheduleRefresh();
+    };
     const footer = el('div', 'wit-modal-footer');
     if (!item) {
         footer.append(button('이 방에 추가', async () => {
@@ -341,6 +353,169 @@ async function openEditor(item) {
         }, 'wit-quiet'));
     }
     d.append(footer);
+}
+
+// ---------- AI ----------
+let aiBusy = false, aiAbort = null, aiError = '';
+function profiles() {
+    try { return context().ConnectionManagerRequestService?.getSupportedProfiles?.() ?? []; } catch { return []; }
+}
+function connectionLabel() {
+    const id = settings().profileId;
+    if (!id) return '현재 채팅 API';
+    return profiles().find(p => p.id === id)?.name ?? '연결 프로필 없음';
+}
+async function callAi(messages, signal) {
+    const c = context(), s = settings();
+    try {
+        if (s.profileId) {
+            const service = c.ConnectionManagerRequestService;
+            if (typeof service?.sendRequest !== 'function') throw new Error('연결 프로필 요청을 지원하지 않는 SillyTavern 버전이에요.');
+            const res = await service.sendRequest(s.profileId, messages, s.maxTokens, { stream: false, signal, extractData: true, includePreset: true, includeInstruct: true });
+            return typeof res === 'string' ? res : String(res?.content ?? '');
+        }
+        if (typeof c.generateRaw !== 'function') throw new Error('generateRaw를 지원하는 SillyTavern 버전이 필요해요.');
+        return String(await c.generateRaw({ prompt: messages, responseLength: s.maxTokens, trimNames: false }) ?? '');
+    } catch (error) {
+        throw new Error(`AI 요청 실패: ${error.cause?.message || error.message}`);
+    }
+}
+async function askAi() {
+    const key = chatKey(), request = aiInput.value.trim();
+    if (!key) { notify('채팅을 먼저 열어주세요.'); return; }
+    if (!request) { notify('요청을 적어주세요.'); return; }
+    if (isGenerating()) { notify('응답 생성이 끝난 뒤 요청해주세요.'); return; }
+    if (aiBusy) return;
+    const controller = new AbortController();
+    aiBusy = true; aiAbort = controller; aiError = ''; render();
+    try {
+        const entries = await getSortedEntries();
+        const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
+        const details = pickDetails(entries, { request, activeKeys, globals: scanGlobals() });
+        const messages = buildAiMessages({ request, entries, details, chatLines: recentChatLines(context().chat, settings().chatTurns) });
+        const text = await callAi(messages, controller.signal);
+        if (controller.signal.aborted || key !== chatKey()) return;
+        const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
+        const time = Date.now(), ready = [];
+        let dropped = 0;
+        for (const [i, p] of parseProposals(text).entries()) {
+            const id = `${time}-${i}`;
+            if (p.action === 'create') { ready.push({ ...p, id, request }); continue; }
+            // Only entries the AI saw in full may be rewritten.
+            const target = detailed.get(entryKey(p.world, p.uid));
+            if (!target) { dropped++; continue; }
+            ready.push({ ...p, id, request, world: target.world, uid: target.uid, base: target.content ?? '', baseKey: target.key ?? [], disable: Boolean(target.disable) });
+        }
+        await writeChatState(s => { s.proposals = [...ready, ...s.proposals]; }, key);
+        aiInput.value = '';
+        if (!ready.length) notify(dropped ? 'AI가 내용을 보지 못한 엔트리만 고치려 해서 버렸어요.' : 'AI가 바꿀 게 없다고 했어요.');
+        else if (dropped) notify(`제안 ${ready.length}개 · 내용을 보지 못한 엔트리 수정 ${dropped}개는 버렸어요.`);
+    } catch (error) {
+        if (!controller.signal.aborted) aiError = error.message || String(error);
+    } finally {
+        if (aiAbort === controller) { aiBusy = false; aiAbort = null; }
+        render();
+    }
+}
+function cancelAi() { aiAbort?.abort(); aiBusy = false; aiAbort = null; render(); }
+async function dropProposal(id, key = chatKey()) {
+    try { await writeChatState(s => { s.proposals = s.proposals.filter(p => p.id !== id); }, key); } catch (error) { notify(error.message, true); }
+    render();
+}
+// An update lands on this chat's copy when one exists.
+async function proposalTarget(p) {
+    const fwd = chatState().replaced.find(r => r.world === p.world && String(r.uid) === String(p.uid));
+    if (fwd && (await context().loadWorldInfo(fwd.book))?.entries?.[fwd.copyUid]) return { world: fwd.book, uid: fwd.copyUid };
+    return { world: p.world, uid: p.uid };
+}
+function proposalEdits(p, raw) {
+    return p.action === 'create'
+        ? { comment: p.comment, key: p.key, keysecondary: [], content: p.content, constant: p.constant }
+        : { comment: p.comment || raw?.comment || '', key: p.key.length ? p.key : (raw?.key ?? []), content: p.content };
+}
+async function applyProposal(p, where) {
+    const key = chatKey();
+    if (!guard(key)) return;
+    if (p.action === 'create') {
+        if (await run(() => addEntry(proposalEdits(p), key))) await dropProposal(p.id, key);
+        scheduleRefresh();
+        return;
+    }
+    const target = await proposalTarget(p);
+    const raw = (await context().loadWorldInfo(target.world))?.entries?.[target.uid];
+    if (!raw) { notify('대상 엔트리를 찾지 못했어요. 삭제됐을 수 있어요.', true); return; }
+    if ((raw.content ?? '') !== p.base && !(await confirmAction('엔트리가 그 사이 바뀌었어요', 'AI가 본 내용과 지금 내용이 달라요. 그래도 덮어쓸까요?'))) return;
+    const edits = proposalEdits(p, raw);
+    let ok;
+    if (target.world === chatBook()) ok = await run(() => saveInPlace(target.world, target.uid, edits));
+    else if (where === 'shared') {
+        if (!(await confirmAction('공용 책에 적용할까요?', `"${target.world}"을(를) 쓰는 모든 채팅에 반영돼요.`))) return;
+        ok = await run(() => saveInPlace(target.world, target.uid, edits));
+    } else ok = await run(() => saveCopy({ world: target.world, uid: target.uid, disable: p.disable }, structuredClone(raw), edits, key));
+    if (ok) await dropProposal(p.id, key);
+    scheduleRefresh();
+}
+async function editProposal(p) {
+    const key = chatKey();
+    const onSaved = () => dropProposal(p.id, key);
+    if (p.action === 'create') return openEditor(null, { draft: proposalEdits(p), onSaved });
+    const target = await proposalTarget(p);
+    const raw = (await context().loadWorldInfo(target.world))?.entries?.[target.uid];
+    return openEditor({ world: p.world, uid: p.uid, disable: p.disable }, { draft: proposalEdits(p, raw), onSaved });
+}
+function diffView(before, after) {
+    const ops = lineDiff(before, after), box = el('div', 'wit-diff');
+    // Show changed lines with one line of context; collapse the rest.
+    const changed = i => Boolean(ops[i]) && ops[i].type !== 'same';
+    const keep = ops.map((_, i) => changed(i) || changed(i - 1) || changed(i + 1));
+    let skipped = false;
+    ops.forEach((op, i) => {
+        if (!keep[i]) { if (!skipped) box.append(el('div', 'wit-diff-skip', '⋯')); skipped = true; return; }
+        skipped = false;
+        box.append(el('div', `wit-diff-${op.type}`, op.text || ' '));
+    });
+    return box;
+}
+function proposalCard(p) {
+    const card = el('article', 'wit-card');
+    const isCreate = p.action === 'create';
+    const inChat = !isCreate && (p.world === chatBook() || chatState().replaced.some(r => r.world === p.world && String(r.uid) === String(p.uid)));
+    const head = el('div', 'wit-card-head');
+    head.append(el('span', `wit-kind is-${p.action}`, isCreate ? '새 엔트리' : '수정'), el('strong', '', p.comment || (isCreate ? '제목 없음' : `엔트리 ${p.uid}`)));
+    card.append(head, el('small', 'wit-muted', isCreate ? '📗 이 방 전용 책에 추가' : inChat ? '📗 이 방' : `📘 ${p.world} · 공용`));
+    if (p.reason) card.append(el('p', 'wit-reason', p.reason));
+    if (isCreate) {
+        if (p.key.length || p.constant) {
+            const keys = el('div', 'wit-why');
+            if (p.constant) keys.append(el('span', '', '🔵 상시 '));
+            for (const k of p.key) keys.append(el('span', 'wit-key', k));
+            card.append(keys);
+        }
+        card.append(el('pre', 'wit-preview', p.content));
+    } else {
+        if (p.key.length && formatKeys(p.key) !== formatKeys(p.baseKey)) card.append(el('small', 'wit-why', `키워드: ${formatKeys(p.baseKey) || '없음'} → ${formatKeys(p.key)}`));
+        card.append(diffView(p.base, p.content));
+    }
+    const actions = el('div', 'wit-card-actions');
+    if (isCreate) actions.append(button('이 방에 추가', () => applyProposal(p, 'here'), 'wit-primary'));
+    else if (inChat) actions.append(button('적용', () => applyProposal(p, 'here'), 'wit-primary'));
+    else actions.append(button('이 방에만 적용', () => applyProposal(p, 'here'), 'wit-primary'), button('공용에 적용', () => applyProposal(p, 'shared'), 'wit-quiet'));
+    actions.append(button('고쳐서 적용', () => editProposal(p), 'wit-quiet'), button('버리기', () => dropProposal(p.id), 'wit-quiet'));
+    for (const b of actions.children) b.disabled = busy;
+    card.append(actions);
+    return card;
+}
+function renderAi() {
+    aiMeta.textContent = `${connectionLabel()} · 최근 대화 ${settings().chatTurns}턴 포함`;
+    aiSend.textContent = aiBusy ? '취소' : '보내기';
+    aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
+    if (aiBusy) body.append(el('p', 'wit-note', 'AI가 엔트리를 살펴보는 중…'));
+    if (aiError) body.append(el('p', 'wit-error', aiError));
+    const proposals = chatState().proposals;
+    if (!proposals.length && !aiBusy && !aiError) {
+        body.append(el('p', 'wit-empty', 'AI 제안은 바로 저장되지 않아요.\n확인하고 적용할 것만 고르면 돼요.'));
+    }
+    for (const p of proposals) body.append(proposalCard(p));
 }
 
 function whyLine(entry) {
@@ -430,10 +605,17 @@ function render() {
     if (!panel || panel.hidden) return;
     const book = chatBook();
     subtitle.textContent = chatKey() ? (book ? `이 방 전용 책: ${book}` : '이 방 전용 책: 아직 없음 · 처음 저장할 때 만들어요') : '채팅을 열어주세요';
-    for (const b of panel.querySelectorAll('.wit-tabs button')) b.classList.toggle('is-active', b.dataset.tab === tab);
+    const pending = chatKey() ? chatState().proposals.length : 0;
+    for (const b of panel.querySelectorAll('.wit-tabs button')) {
+        b.classList.toggle('is-active', b.dataset.tab === tab);
+        if (b.dataset.tab === 'ai') b.textContent = pending ? `AI ${pending}` : 'AI';
+    }
+    toolbar.hidden = tab === 'ai';
+    aiBox.hidden = tab !== 'ai';
     body.replaceChildren();
     if (!chatKey()) body.append(el('p', 'wit-empty', '채팅을 열어주세요.'));
     else if (tab === 'active') renderActive();
+    else if (tab === 'ai') renderAi();
     else renderAll();
     status.textContent = busy ? '저장 중…' : isGenerating() ? '생성 중에는 저장할 수 없어요' : '';
 }
@@ -542,17 +724,25 @@ function buildUI() {
     subtitle = el('p', 'wit-muted'); titles.append(subtitle);
     header.append(titles, button('×', () => setPanelOpen(false), 'wit-close', '닫기'));
     const tabs = el('div', 'wit-tabs');
-    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체 엔트리']]) {
+    for (const [kind, label] of [['active', '이번 응답'], ['all', '전체 엔트리'], ['ai', 'AI']]) {
         const b = button(label, () => { tab = kind; render(); refreshAll(); });
         b.dataset.tab = kind; tabs.append(b);
     }
-    const toolbar = el('div', 'wit-toolbar');
+    toolbar = el('div', 'wit-toolbar');
     searchInput = el('input', 'wit-search'); searchInput.type = 'search'; searchInput.placeholder = '제목 · 책 · 키워드 검색';
     searchInput.addEventListener('input', () => { search = searchInput.value; render(); });
     toolbar.append(searchInput, button('＋ 새 엔트리', () => openEditor(null), 'wit-primary', '이 방 전용 엔트리 추가'));
+    // The request box lives outside the re-rendered body so typing is never interrupted.
+    aiBox = el('div', 'wit-ask'); aiBox.hidden = true;
+    aiInput = el('textarea', 'wit-ask-input'); aiInput.rows = 3; aiInput.setAttribute('aria-label', 'AI에게 요청');
+    aiInput.placeholder = '예: 10층이 클리어되면 균열이 생기는 설정 추가해줘\n예: 2층 클리어됐어, 관련 엔트리 갱신해줘';
+    aiSend = button('보내기', () => (aiBusy ? cancelAi() : askAi()), 'wit-primary');
+    aiMeta = el('small', 'wit-muted');
+    const askRow = el('div', 'wit-ask-row'); askRow.append(aiMeta, aiSend);
+    aiBox.append(aiInput, askRow);
     body = el('div', 'wit-body');
     status = el('footer', 'wit-status'); status.setAttribute('role', 'status');
-    panel.append(header, tabs, toolbar, body, status);
+    panel.append(header, tabs, toolbar, aiBox, body, status);
     document.body.append(launcher, panel);
     showFloatingIcon();
     render();
@@ -574,7 +764,31 @@ function buildSettings() {
     const size = el('input'); size.type = 'range'; size.min = '24'; size.max = '72'; size.step = '1'; size.value = String(floatingSize);
     size.addEventListener('input', () => setFloatingSize(size.value));
     const sizeRow = el('label', 'wit-size', '아이콘 크기'); sizeRow.append(size);
-    content.append(actions, showRow, sizeRow, el('small', '', '마법봉(🪄) 메뉴에서도 열 수 있어요.'));
+    // AI connection: the current chat API, or a Connection Manager profile.
+    const profile = el('select', 'text_pole');
+    const fillProfiles = () => {
+        const current = settings().profileId;
+        profile.replaceChildren(new Option('현재 채팅 API', ''), ...profiles().map(p => new Option(p.name, p.id)));
+        profile.value = current;
+        if (profile.value !== current) profile.value = '';
+    };
+    fillProfiles();
+    profile.addEventListener('focus', fillProfiles);
+    profile.addEventListener('change', () => { settings().profileId = profile.value; context().saveSettingsDebounced(); render(); });
+    const numberSetting = (label, name, min, max) => {
+        const input = el('input', 'text_pole'); input.type = 'number'; input.min = String(min); input.max = String(max); input.value = String(settings()[name]);
+        input.addEventListener('change', () => {
+            const n = Math.round(Number(input.value));
+            settings()[name] = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : settings()[name];
+            input.value = String(settings()[name]); context().saveSettingsDebounced(); render();
+        });
+        const row = el('label', 'wit-setting', label); row.append(input);
+        return row;
+    };
+    const profileRow = el('label', 'wit-setting', 'AI 연결'); profileRow.append(profile);
+    content.append(actions, showRow, sizeRow, el('hr', 'sysHR'), profileRow,
+        numberSetting('함께 보낼 최근 대화 (턴)', 'chatTurns', 0, 100), numberSetting('AI 응답 최대 토큰', 'maxTokens', 256, 32000),
+        el('small', '', '마법봉(🪄) 메뉴에서도 열 수 있어요.'));
     drawer.append(header, content); wrap.append(drawer); host.append(wrap);
 }
 function buildMenuItem() {
@@ -627,6 +841,8 @@ export function onEnable() {
     listen(event_types.CHAT_CHANGED, () => {
         generation = null; result = { chat: '', phase: 'unknown', entries: [] };
         allEntries = []; allChat = ''; allError = ''; allToken++; fileOn.clear();
+        if (aiBusy) cancelAi();
+        aiError = '';
         closeDialog(); scheduleRefresh();
     });
     for (const name of ['WORLDINFO_UPDATED', 'WORLDINFO_SETTINGS_UPDATED', 'CHARACTER_EDITED']) listen(event_types[name], scheduleRefresh);
@@ -644,6 +860,7 @@ export function onDisable() {
     closeDialog();
     panel?.remove(); launcher?.remove();
     document.getElementById('wit-settings')?.remove(); document.getElementById('wit-menu-item')?.remove();
+    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiError = '';
     panel = null; launcher = null; badge = null; generation = null;
     result = { chat: '', phase: 'unknown', entries: [] }; allEntries = []; allChat = '';
 }

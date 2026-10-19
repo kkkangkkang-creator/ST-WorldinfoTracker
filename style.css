@@ -67,3 +67,32 @@ dialog.wit-dialog .wit-settings-row input { width:68px; flex:none; text-align:ri
     .wit-panel,.wit-panel[popover] { inset:auto 8px 79px auto; right:8px; bottom:79px; width:calc(100vw - 16px); max-width:none; height:min(560px,calc(100dvh - 100px)); border-radius:14px; }
     .wit-dialog { padding:10px; max-width:calc(100vw - 12px); height:calc(100dvh - 16px); }
 }
+
+/* AI tab */
+.wit-toolbar[hidden],.wit-ask[hidden] { display:none!important; }
+.wit-ask { display:flex; flex-direction:column; gap:6px; }
+.wit-panel textarea.wit-ask-input { width:100%; resize:vertical; min-height:64px; margin:0; background:#ffffff!important; color:var(--wit-text)!important; border:1px solid var(--wit-line)!important; border-radius:9px; padding:7px 9px; font-size:13px; line-height:1.45; font-family:inherit; box-shadow:none; }
+.wit-ask-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.wit-ask-row small { font-size:11px; overflow-wrap:anywhere; }
+.wit-ask-row button { flex:none; min-width:72px; }
+.wit-empty { white-space:pre-line; }
+.wit-card { background:#ffffff; border:1px solid var(--wit-line); border-radius:12px; padding:10px; margin-bottom:10px; display:flex; flex-direction:column; gap:6px; }
+.wit-card-head { display:flex; align-items:center; gap:7px; }
+.wit-card-head strong { font-size:13px; overflow-wrap:anywhere; }
+.wit-kind { flex:none; font-size:10px; font-weight:700; border-radius:5px; padding:1px 6px; }
+.wit-kind.is-create { background:#e3f1e6; color:#2f6b3f; }
+.wit-kind.is-update { background:#f6ecd9; color:#7a5414; }
+.wit-card > small { font-size:11px; overflow-wrap:anywhere; }
+.wit-reason { margin:0; font-size:12px; color:var(--wit-text); }
+.wit-panel .wit-preview,.wit-diff { margin:0; max-height:180px; overflow:auto; background:var(--wit-card); border-radius:8px; padding:8px; font-family:inherit; font-size:12px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
+.wit-diff > div { padding:0 4px; border-radius:3px; }
+.wit-diff-same { color:var(--wit-muted); }
+.wit-diff-add { background:#dff1e2; color:#1f5a2e; }
+.wit-diff-add::before { content:'+ '; }
+.wit-diff-del { background:#f8e0dc; color:#8e3c27; text-decoration:line-through; }
+.wit-diff-del::before { content:'− '; }
+.wit-diff-skip { color:var(--wit-muted); text-align:center; }
+.wit-card-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.wit-card-actions button { min-height:30px; padding:4px 9px; font-size:12px; }
+.wit-setting { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:6px 0; }
+.wit-setting select,.wit-setting input { max-width:180px; margin:0; }

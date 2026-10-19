@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 import {
     keyMatches, scanMessages, explainEntry, recursionText, applyReplacements, applyToggles,
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences, entryKey,
+    pickDetails, buildAiMessages, recentChatLines, parseProposals, lineDiff,
 } from '../core.mjs';
 
 const globals = { depth: 2, caseSensitive: false, matchWholeWords: false };
@@ -98,4 +99,47 @@ test('chat toggles clone entries with the chosen ON/OFF', () => {
     assert.equal(payload.globalLore[0].disable, false);
     assert.equal(original.disable, true, 'cached entry untouched');
     assert.equal(applyToggles(payload, {}), 0);
+});
+
+test('AI details: entries named in the request first, then active ones, within budget', () => {
+    const entries = [
+        { world: 'AU', uid: 1, comment: '균열', key: ['rift'], content: 'a'.repeat(10) },
+        { world: 'AU', uid: 2, comment: 'Towers', key: ['탑'], content: 'b'.repeat(10) },
+        { world: 'AU', uid: 3, comment: 'Big', key: [], content: 'c'.repeat(100) },
+    ];
+    const picked = pickDetails(entries, { request: '탑 2층 클리어 반영해줘', activeKeys: new Set([entryKey('AU', 3), entryKey('AU', 1)]), budget: 50 });
+    assert.deepEqual(picked.map(e => e.uid), [2, 1], 'named first, Big skipped for budget');
+});
+
+test('AI messages carry the list, details, chat and request', () => {
+    const [system, user] = buildAiMessages({
+        request: '균열 추가해줘',
+        entries: [{ world: 'AU', uid: 2, comment: 'Towers', key: ['탑'], constant: true, disable: true }],
+        details: [{ world: 'AU', uid: 2, comment: 'Towers', content: 'two weeks' }],
+        chatLines: recentChatLines([{ name: 'User', mes: 'hi' }, { name: 'N', mes: 'x', is_system: true }, { name: 'Lena', mes: 'yo' }], 1),
+    });
+    assert.equal(system.role, 'system');
+    assert.match(system.content, /"proposals"/);
+    assert.match(user.content, /AU \| 2 \| Towers \| 탑 \| constant, off/);
+    assert.match(user.content, /### \[AU #2\] Towers\ntwo weeks/);
+    assert.match(user.content, /## RECENT CHAT \(oldest first\)\n\nLena: yo/);
+    assert.match(user.content, /## REQUEST\n\n균열 추가해줘$/);
+});
+
+test('AI replies are parsed leniently and validated', () => {
+    const reply = 'Sure!\n```json\n{"proposals":[{"action":"create","comment":"균열","keys":["균열","rift"],"content":"## Rifts","reason":"요청"},' +
+        '{"action":"update","world":"AU","uid":2,"content":"9 days"},{"action":"delete","content":"x"},{"action":"create","content":"  "}]}\n```';
+    const list = parseProposals(reply);
+    assert.equal(list.length, 2);
+    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', reason: '요청' });
+    assert.equal(list[1].world, 'AU');
+    assert.equal(list[1].uid, 2);
+    assert.throws(() => parseProposals('no json here'), /JSON을 찾지/);
+    assert.throws(() => parseProposals('{"proposals": [}'), /깨져/);
+    assert.deepEqual(parseProposals('{"proposals":[]}'), []);
+});
+
+test('line diff marks removed and added lines', () => {
+    assert.deepEqual(lineDiff('a\nb\nc', 'a\nB\nc').map(x => x.type), ['same', 'del', 'add', 'same']);
+    assert.deepEqual(lineDiff('', 'x').map(x => x.type), ['del', 'add']);
 });

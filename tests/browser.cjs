@@ -56,6 +56,7 @@ window.SillyTavern = {
         updateWorldInfoList: async () => {}, reloadWorldInfoEditor: () => {},
         getWorldInfoNames: () => Object.keys(window.books),
         Popup: { show: { confirm: async () => 1 } },
+        generateRaw: async ({ prompt }) => { window.aiPrompt = prompt; await new Promise(r => setTimeout(r, 50)); return window.aiReply; },
     }),
 };
 window.chats = chats; window.store = store;
@@ -202,8 +203,52 @@ window.chats = chats; window.store = store;
     assert.equal(await page.evaluate(() => window.books.AU.entries[5].content), 'Inside the tower (edited)');
     await page.evaluate(() => { window.busy = false; });
 
-    // Phone width.
+    // 10. AI: request -> proposals -> apply. Chat B has no chat book yet.
     await page.keyboard.press('Escape');
+    await page.evaluate(() => {
+        window.aiReply = JSON.stringify({ proposals: [
+            { action: 'create', comment: '균열', keys: ['균열', 'rift'], content: '## Rifts (not yet occurred)\n- Only after a 10th floor is cleared.', reason: '균열 설정 추가' },
+            { action: 'update', world: 'AU', uid: 2, comment: '헌터물 기본 설정 보강', keys: [], content: 'Around 9 days remain. roughly 9 days remaining.', reason: '타이머 갱신' },
+            { action: 'update', world: 'AU', uid: 0, content: 'made up', reason: 'not shown in full' },
+        ] });
+    });
+    await page.click('.wit-tabs button[data-tab=ai]');
+    await page.fill('.wit-ask-input', '헌터물 기본 설정 보강 타이머 9일로, 균열 설정 추가해줘');
+    await page.click('.wit-ask button >> text=보내기');
+    await page.waitForSelector('.wit-card >> nth=1');
+    const prompt = await page.evaluate(() => window.aiPrompt);
+    assert.equal(prompt[0].role, 'system');
+    assert.match(prompt[1].content, /### \[AU #2\] 헌터물 기본 설정 보강/);
+    assert.doesNotMatch(prompt[1].content, /### \[AU #0\]/);
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 2, 'update of an unseen entry is dropped');
+    assert.equal(await page.textContent('.wit-tabs button[data-tab=ai]'), 'AI 2');
+    assert.deepEqual(await page.$$eval('.wit-diff-add', d => d.map(x => x.textContent)), ['Around 9 days remain. roughly 9 days remaining.']);
+    if (shots) await page.screenshot({ path: path.join(shots, '7-ai.png') });
+    await page.click('.wit-card:has-text("타이머 갱신") button >> text=이 방에만 적용');
+    await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 1);
+    let bState = await page.evaluate(() => ({ books: window.books, meta: window.chats.B }));
+    const bBook = bState.meta.world_info;
+    assert.equal(bState.books.AU.entries[2].content, 'Around two weeks remain. roughly two weeks remaining.');
+    assert.equal(Object.values(bState.books[bBook].entries)[0].content, 'Around 9 days remain. roughly 9 days remaining.');
+    assert.equal(bState.meta.worldinfo_tracker.proposals.length, 1);
+    // "고쳐서 적용" opens the editor with the draft; saving drops the proposal.
+    await page.click('.wit-card button >> text=고쳐서 적용');
+    await page.waitForSelector('.wit-dialog');
+    assert.equal(await page.inputValue('.wit-dialog .wit-field >> nth=0 >> input'), '균열');
+    await page.fill('.wit-dialog .wit-field >> nth=0 >> input', '균열 (Rift)');
+    await page.click('.wit-dialog button >> text=이 방에 추가');
+    await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 0);
+    bState = await page.evaluate(() => ({ books: window.books, meta: window.chats.B }));
+    assert.deepEqual(Object.values(bState.books[bBook].entries).map(e => e.comment), ['헌터물 기본 설정 보강', '균열 (Rift)']);
+    assert.deepEqual(bState.meta.worldinfo_tracker.proposals, []);
+    // A broken reply shows an error, keeps the request text.
+    await page.evaluate(() => { window.aiReply = 'sorry, I cannot'; });
+    await page.fill('.wit-ask-input', '아무거나');
+    await page.click('.wit-ask button >> text=보내기');
+    await page.waitForSelector('.wit-error');
+    assert.equal(await page.inputValue('.wit-ask-input'), '아무거나');
+
+    // Phone width.
     await page.setViewportSize({ width: 390, height: 760 });
     if (shots) await page.screenshot({ path: path.join(shots, '4-phone.png') });
 
