@@ -182,44 +182,69 @@ export const DEFAULT_EXTRA_PROMPT = `## Concrete Concepts & Naming
 - Do not turn ordinary things into extraordinary ones just to create mystery, grandeur, or importance.`;
 
 // Editable rules. Defaults are used until the user changes them in the settings tab.
+// Shared paragraphs are written once and composed into both defaults.
+const WRITING_RULES = `Writing entries:
+- Write the current state, not a diary: "Has a scar on her left cheek since the Floor 3 raid", not a retelling of the raid.
+- Keep entries short: facts as bullets, one per line. A character entry covers who they are, appearance, ability and its limits, affiliation, relationships with other named characters, and anything the story must keep consistent.
+- Match the language, tone and formatting of the existing entries (headings, bullet style).
+- Don't copy STORY SETUP word for word; take only what the entry needs.
+- "keys": the name plus the other names, spellings and nicknames that appear in chat. "constant": true only for rules that must always apply.`;
+
+const COMMON_RULES = `Rules:
+- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid. Skip a fix to an entry that is not shown there.
+- Put all changes to one entry in a single proposal. Keep each "find" short but unambiguous.
+- Prefer updating an existing entry over creating a near-duplicate.
+- For something that has not happened yet in the story, state its trigger condition explicitly so it is never treated as current fact.
+- At most 10 proposals, most important first.`;
+
+const VARIABLE_RULES = `Variables: values that change as the story goes on (dates, timers, counts, ranks, affiliations, statuses) can live in chat variables. An entry reads one with {{getvar::name}}; the value is stored per chat, not in the entry.
+- Top-level "vars" sets variables already listed under CURRENT VALUES (exact names only). Never invent a variable there, and never write such a value into entry text.
+- To turn a changing value inside an entry into a variable: in that entry's "update", replace the value in "edits" with {{getvar::name}} and list the variable in that update's "vars" with its current value. Prefer an absolute date over a countdown when the chat shows today's date.`;
+
 export const DEFAULT_ASK_RULES = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. The user asks you to add or update entries.
 The user is talking to you, the lorebook maintainer, not to the roleplay: every request is about the lorebook. "Enter", "write", "put in", "update" or "recalculate" X means change the lorebook so it holds X (e.g. recompute a timer from the current in-story date in RECENT CHAT and set the result).
 
-Rules:
-- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid.
-- Keep each "find" short but unambiguous.
-- Prefer updating an existing entry over creating a near-duplicate.
-- Match the language, tone and formatting of the existing entries (headings, bullet style).
-- For something that has not happened yet in the story, state its trigger condition explicitly so it is never treated as current fact.
-- "keys": names and words that appear in chat when the entry matters. "constant": true only for rules that must always apply.
+What you get: STORY SETUP (character card, the user's persona, author's note), ENTRY LIST (every entry's title and keys), ENTRY DETAILS (full text of the entries you may update), CURRENT VALUES (chat variables), RECENT CHAT and the REQUEST.
+
+How to work:
+- Do the whole request. If it covers several things (e.g. "add the five NPCs"), make one proposal for each; never stop after the first.
+- Take facts from STORY SETUP, RECENT CHAT and the existing entries. Where the request leaves a detail open, keep it consistent with them, and don't invent major facts the user did not ask for.
+- Look in ENTRY LIST first. If an entry already covers it, update that entry.
+
+${WRITING_RULES}
+
+${COMMON_RULES}
 - "reason": one short sentence in the language of the chat.
-- At most 5 proposals.
 
-Variables: values that change as the story goes on (dates, timers, counts, ranks, affiliations, statuses) can live in chat variables. An entry reads one with {{getvar::name}}; the value is stored per chat, not in the entry.
-- Top-level "vars" sets variables already listed under CURRENT VALUES (exact names only). Never invent a variable there, and never write such a value into entry text.
-- To turn a changing value inside an entry into a variable: in that entry's "update", replace the value in "edits" with {{getvar::name}} and list the variable in that update's "vars" with its current value. Prefer an absolute date over a countdown when the chat shows today's date.`;
+${VARIABLE_RULES}`;
 
-export const DEFAULT_TRACK_RULES = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. Read NEW CHAT and report only lasting changes the lorebook should reflect. Nobody is talking to you: answer with the JSON only.
+export const DEFAULT_TRACK_RULES = `You maintain the World Info (lorebook) of an ongoing SillyTavern roleplay. Read NEW CHAT and report the lasting changes the lorebook should reflect. Nobody is talking to you: answer with the JSON only.
 
-What to report (only what NEW CHAT actually establishes, never plans, rumors or guesses):
-1. Value changes: CURRENT VALUES lists chat variables that entries read with {{getvar::name}}. If NEW CHAT shows one has a different value now, put its new value in top-level "vars", in the same format as the old value.
-2. Stale information: an entry in ENTRY DETAILS states something NEW CHAT has made untrue (e.g. "has not happened yet", "does not exist yet", an old affiliation or status). Propose an "update" with "edits" that fix only that wording. If the changing fact is a value, turn it into a variable (see Variables).
-3. New lasting facts: a named character, place, faction, item, creature or rule that matters later and has no entry in ENTRY LIST (check titles and keys first). Propose a "create". Skip scenery, moods, one-off actions and anything already covered.
-Prefer nothing over noise.
+What you get:
+- STORY SETUP: the character card, the user's persona and the author's note. The roleplay already sends these every turn; use them as background facts.
+- ENTRY LIST: every entry's title and keys. ENTRY DETAILS: the full text of the entries you may update.
+- CURRENT VALUES: chat variables that entries read with {{getvar::name}}.
+- NEW CHAT: the part of the story you have not read yet.
 
-Rules:
-- "update" may only target an entry shown in full under ENTRY DETAILS, using its exact world and uid.
-- Keep each "find" short but unambiguous.
-- Prefer updating an existing entry over creating a near-duplicate.
-- Match the language, tone and formatting of the existing entries (headings, bullet style).
-- For something that has not happened yet in the story, state its trigger condition explicitly so it is never treated as current fact.
-- "keys": names and words that appear in chat when the entry matters. "constant": true only for rules that must always apply.
-- "reason": one short sentence in the language of the chat.
-- At most 5 proposals.
+How to work:
+1. Go through NEW CHAT from start to end. Note every named character, place, group, item, creature, ability and rule in it, and every lasting change: an injury, a new rank or affiliation, a changed relationship, a revealed secret, a rule learned, a deadline set.
+2. Look each one up in ENTRY LIST by title and keys, including other spellings and nicknames.
+3. Decide for each one:
+   - A value in CURRENT VALUES changed: put the new value in top-level "vars", in the same format as the old value.
+   - It has an entry, and the entry is now wrong (e.g. "has not happened yet", an old affiliation or status): "update" fixing only that wording.
+   - It has an entry, but the entry lacks a lasting fact NEW CHAT established: "update" adding it in the entry's own format.
+   - It has no entry and will matter again (named, recurring, or affecting later events): "create". Fill it in from NEW CHAT and STORY SETUP (e.g. a character's ability written in the author's note).
+   - Anything else (scenery, mood, a one-off action, something already covered): skip.
+4. Handle every character separately. When several qualify, propose each one; never stop after the first.
 
-Variables: values that change as the story goes on (dates, timers, counts, ranks, affiliations, statuses) can live in chat variables. An entry reads one with {{getvar::name}}; the value is stored per chat, not in the entry.
-- Top-level "vars" sets variables already listed under CURRENT VALUES (exact names only). Never invent a variable there, and never write such a value into entry text.
-- To turn a changing value inside an entry into a variable: in that entry's "update", replace the value in "edits" with {{getvar::name}} and list the variable in that update's "vars" with its current value. Prefer an absolute date over a countdown when the chat shows today's date.`;
+Established means the narration shows it happening, or it is stated as fact and not contradicted. Plans, rumors, guesses, lies and dreams are not established. When unsure, skip it.
+
+${WRITING_RULES}
+
+${COMMON_RULES}
+- "reason": one short sentence in the language of the chat, naming what in NEW CHAT shows it.
+
+${VARIABLE_RULES}`;
 
 /** The editable rules, the locked reply format, then the user's extra instructions. */
 export function buildSystemPrompt(rules, extra = '') {
@@ -259,9 +284,11 @@ export function pickDetails(entries, { request = '', activeKeys = new Set(), tar
 
 const entryList = entries => entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).slice(0, 4).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
 const entryBodies = details => details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
+const setupText = setup => (Array.isArray(setup) ? setup : []).filter(x => x?.text).map(x => `### ${x.label}\n${x.text}`).join('\n\n');
 const valueList = vars => Object.entries(vars || {}).map(([k, v]) => `${k} = ${v === '' ? '(not set)' : v}`);
-export function buildAiMessages({ request, entries, details, chatLines = [], vars = {}, rules = DEFAULT_ASK_RULES, extra = '' }) {
+export function buildAiMessages({ request, entries, details, chatLines = [], vars = {}, setup = [], rules = DEFAULT_ASK_RULES, extra = '' }) {
     const user = [
+        '## STORY SETUP', setupText(setup) || '(none)',
         '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
         '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
         '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',
@@ -271,8 +298,9 @@ export function buildAiMessages({ request, entries, details, chatLines = [], var
     return [{ role: 'system', content: buildSystemPrompt(rules, extra) }, { role: 'user', content: user }];
 }
 
-export function buildTrackMessages({ lines, vars = {}, entries, details, rules = DEFAULT_TRACK_RULES, extra = '', part = null }) {
+export function buildTrackMessages({ lines, vars = {}, entries, details, setup = [], rules = DEFAULT_TRACK_RULES, extra = '', part = null }) {
     const user = [
+        '## STORY SETUP', setupText(setup) || '(none)',
         '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
         '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
         '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',

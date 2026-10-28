@@ -289,7 +289,7 @@ test('tracker messages and prompts', () => {
         entries: [{ world: 'AU', uid: 1, comment: '소렌', key: ['a', 'b', 'c', 'd', 'e'], constant: false }],
         details: [], part: { i: 2, n: 3 },
     });
-    assert.match(system.content, /report only lasting changes/);
+    assert.match(system.content, /report the lasting changes/);
     assert.match(system.content, /Additional instructions[^\n]*\n한국어로$/);
     assert.match(user.content, /## CURRENT VALUES \(variable = value\)\n\n클리어_층 = 1/);
     assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d \| keyword/);
@@ -312,4 +312,16 @@ test('rules are editable, the reply format is always appended and locked', () =>
     assert.equal(AI_SYSTEM_PROMPT, buildSystemPrompt(DEFAULT_ASK_RULES));
     // the format block is the only place that spells out the JSON shape
     for (const rules of [DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES]) assert.ok(!rules.includes('Reply with JSON'));
+});
+
+test('story setup goes first in both requests, and the rules ask for every qualifying item', () => {
+    const setup = [{ label: "Author's note", text: 'Mira: ice.' }, { label: 'Empty', text: '' }];
+    const track = buildTrackMessages({ lines: ['x'], entries: [], details: [], setup })[1].content;
+    assert.ok(track.startsWith("## STORY SETUP\n\n### Author's note\nMira: ice.\n\n## CURRENT VALUES"), track);
+    const ask = buildAiMessages({ request: 'r', entries: [], details: [], setup: [] })[1].content;
+    assert.ok(ask.startsWith('## STORY SETUP\n\n(none)'), ask);
+    for (const rules of [DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES]) {
+        assert.match(rules, /never stop after the first/);
+        assert.match(rules, /At most 10 proposals/);
+    }
 });

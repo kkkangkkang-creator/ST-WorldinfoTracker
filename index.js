@@ -64,6 +64,10 @@ function settings() {
         c.extensionSettings[KEY].namingSeeded = true;
     }
     c.extensionSettings[KEY].thinking ??= 'min';
+    // Background the AI reads along with the chat.
+    c.extensionSettings[KEY].sendCard ??= true;
+    c.extensionSettings[KEY].sendPersona ??= true;
+    c.extensionSettings[KEY].sendNote ??= true;
     return c.extensionSettings[KEY];
 }
 
@@ -533,6 +537,30 @@ const summarize = ({ applied = [], ready = [], dropped = 0 }) => [
     dropped ? `맞지 않아 버린 수정 ${dropped}개` : '',
 ].filter(Boolean).join(' · ');
 
+// Character card(s), persona and author's note, as the AI tab and tracking send them.
+const SETUP_MAX_CHARS = 8000;
+function storySetup() {
+    const c = context(), s = settings(), out = [];
+    const add = (label, text) => {
+        const t = String(c.substituteParams?.(String(text ?? '')) ?? text ?? '').trim();
+        if (t) out.push({ label, text: t.length > SETUP_MAX_CHARS ? `${t.slice(0, SETUP_MAX_CHARS)}…` : t });
+    };
+    const group = c.groupId != null ? c.groups?.find(g => String(g.id) === String(c.groupId)) : null;
+    const chars = group ? (c.characters || []).filter(ch => group.members?.includes(ch.avatar)) : [c.characters?.[c.characterId]].filter(Boolean);
+    if (s.sendCard) for (const ch of chars) {
+        add(`Character card: ${ch.name}`, [ch.description, ch.personality && `Personality: ${ch.personality}`, ch.scenario && `Scenario: ${ch.scenario}`].filter(Boolean).join('\n\n'));
+    }
+    if (s.sendPersona) add(`User persona: ${c.name1 || 'User'}`, c.powerUserSettings?.persona_description);
+    if (s.sendNote) {
+        add("Author's note", c.chatMetadata?.note_prompt);
+        for (const ch of chars) {
+            const file = String(ch.avatar || '').replace(/\.[^.]+$/, '');
+            add(`Character author's note: ${ch.name}`, c.extensionSettings?.note?.chara?.find(x => x.name === file)?.prompt);
+        }
+    }
+    return out;
+}
+
 async function askAi() {
     const key = chatKey(), request = aiInput.value.trim();
     if (!key) { notify('채팅을 먼저 열어주세요.'); return; }
@@ -546,7 +574,7 @@ async function askAi() {
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
         const chatLines = thinTagBlocks(recentChatLines(context().chat, settings().chatTurns), parseTagList(settings().trackTags));
         const details = pickDetails(entries, { request, activeKeys, targets: new Set(aiTargets.keys()), globals: scanGlobals() });
-        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), rules: rulesFor('ask'), extra: settings().customPrompt });
+        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), setup: storySetup(), rules: rulesFor('ask'), extra: settings().customPrompt });
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
         aiRaw = text;
@@ -615,10 +643,11 @@ async function trackChat({ manual = false } = {}) {
         const entries = await getSortedEntries();
         const known = trackedVarNames(entries), applied = [], allReady = [];
         let dropped = 0;
+        const setup = storySetup();
         for (const [i, part] of parts.entries()) {
             if (parts.length > 1) { aiNote = `대화를 읽는 중… (${i + 1}/${parts.length})`; render(); }
             const details = pickTrackDetails(entries, part.join('\n'), { budget: TRACK_BODY_BUDGET, globals: scanGlobals() });
-            const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, rules: rulesFor('track'), extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
+            const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, setup, rules: rulesFor('track'), extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
             const reply = await callAi(messages, controller.signal);
             if (controller.signal.aborted || key !== chatKey()) return;
             aiRaw = reply;
@@ -1166,6 +1195,13 @@ function buildSetup() {
         }
         save();
     });
+    const sendBox = el('div', 'wit-send');
+    const sendChecks = [['sendCard', '캐릭터 카드'], ['sendPersona', '유저 페르소나'], ['sendNote', '작가노트']].map(([name, label]) => {
+        const wrap = el('label', 'checkbox_label'), input = el('input'); input.type = 'checkbox';
+        input.addEventListener('change', () => { settings()[name] = input.checked; save(); });
+        wrap.append(input, el('span', '', label)); sendBox.append(wrap);
+        return [name, input];
+    });
     const tags = el('input'); tags.placeholder = 'Status'; tags.setAttribute('aria-label', '상태창 태그');
     tags.addEventListener('change', () => { settings().trackTags = tags.value.trim(); save(); });
     const prompt = el('textarea', 'wit-setup-prompt'); prompt.rows = 8;
@@ -1198,7 +1234,8 @@ function buildSetup() {
     advanced.append(el('summary', '', 'AI 지시문 (고급)'), el('small', 'wit-muted', '단어 하나로도 결과가 달라져요. 마음대로 고쳐도 되고, 답변 형식은 잠겨 있어서 망가지지 않아요. 글자 수만큼 요청마다 토큰이 들어요. 영어로 쓰는 게 가장 잘 따라요.'),
         askRules.wrap, trackRules.wrap, locked);
     const row = (label, input, unit, hint) => {
-        const wrap = el('label', 'wit-setup-row');
+        // A group of checkboxes carries its own labels, so it can't sit inside another <label>.
+        const wrap = el(input.tagName === 'DIV' ? 'div' : 'label', 'wit-setup-row');
         wrap.append(el('span', 'wit-setup-label', label), input);
         if (unit) wrap.append(el('span', 'wit-muted', unit));
         const group = el('div', 'wit-setup-group'); group.append(wrap);
@@ -1210,6 +1247,7 @@ function buildSetup() {
         row('연결', profile, '', profileHint),
         row('생각', thinking, '', '모델의 생각(추론)에 쓰는 토큰. 끄면 훨씬 싸요. 연결 프로필로 요청할 때만 적용되고, 현재 채팅 API는 SillyTavern 설정을 따라요.'),
         row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수. 요청 비용의 큰 부분이에요.'),
+        row('보낼 자료', sendBox, '', 'AI 탭 요청과 자동 추적에 배경 자료로 같이 보내요. 카드·노트에만 적힌 인물이나 능력도 엔트리에 반영할 수 있게 돼요. 길이만큼 요청마다 토큰이 들어요(항목당 최대 8000자).'),
         row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
         el('h4', '', '자동 추적'),
         row('자동 추적', autoOn, '', '켜면 대화가 쌓일 때 AI가 월드인포를 확인해요. 값 변화는 바로 적용하고, 낡은 정보·새 설정은 AI 탭에 제안으로 남겨요. 켠 시점부터 세요.'),
@@ -1228,6 +1266,7 @@ function buildSetup() {
         profileHint.textContent = list.length ? '월드인포 작업에만 다른 모델을 쓰고 싶을 때 연결 프로필을 고르세요.' : '연결 프로필이 없어요. SillyTavern의 연결 관리자(Connection Profiles)에서 만들 수 있어요.';
         thinking.value = s.thinking; turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
         askRules.fill(); trackRules.fill();
+        for (const [name, input] of sendChecks) input.checked = Boolean(s[name]);
         autoOn.checked = Boolean(s.autoOn); if (document.activeElement !== tags) tags.value = s.trackTags;
         if (document.activeElement !== prompt) prompt.value = s.customPrompt;
     };

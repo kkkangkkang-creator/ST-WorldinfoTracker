@@ -59,8 +59,9 @@ window.SillyTavern = {
     libs: { localforage: { getItem: async k => store.get(k) ?? null, setItem: async (k, v) => { store.set(k, structuredClone(v)); } } },
     getContext: () => ({
         extensionSettings, saveSettingsDebounced: () => {},
-        chatMetadata: chats[window.currentChat], saveMetadata: async () => {},
-        getCurrentChatId: () => window.currentChat, characters: [{ avatar: 'lena.png' }], characterId: 0,
+        chatMetadata: Object.assign(chats[window.currentChat], { note_prompt: 'NPC Mira: ice ability.' }), saveMetadata: async () => {},
+        getCurrentChatId: () => window.currentChat, characters: [{ avatar: 'lena.png', name: 'Lena', description: 'Lena is a fire Awakened.' }], characterId: 0, name1: 'Me',
+        powerUserSettings: { persona_description: 'I am an appraiser.' },
         chat: window.chat, substituteParams: x => x,
         loadWorldInfo: async n => window.books[n] ? structuredClone(window.books[n]) : null,
         saveWorldInfo: async (n, d) => { window.books[n] = structuredClone(d); },
@@ -237,6 +238,8 @@ window.chats = chats; window.store = store;
     const prompt = await page.evaluate(() => window.aiPrompt);
     assert.equal(prompt[0].role, 'system');
     assert.match(prompt[1].content, /### \[AU #2\] 헌터물 기본 설정 보강/);
+    const setup = prompt[1].content.split('## CURRENT VALUES')[0];
+    for (const t of ['### Character card: Lena\nLena is a fire Awakened.', '### User persona: Me\nI am an appraiser.', "### Author's note\nNPC Mira: ice ability."]) assert.ok(setup.includes(t), setup);
     assert.doesNotMatch(prompt[1].content, /### \[AU #0\]/);
     assert.equal(await page.$$eval('.wit-card', c => c.length), 2, 'update of an unseen entry is dropped');
     assert.ok(await page.$('.wit-card strong >> text=헌터물 기본 설정 보강'), 'edit-style update shows the entry title');
@@ -287,10 +290,10 @@ window.chats = chats; window.store = store;
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.autoOn, s.autoEvery, s.trackTags]; }), [false, 30, 'Status'], 'auto tracking is off by default, every 30 turns');
     const numbers = await page.$$('.wit-setup input[type=number]');
     await numbers[2].fill('3'); await numbers[2].press('Tab');
-    await page.check('.wit-setup input[type=checkbox]');
+    await page.check('.wit-setup input[aria-label="자동 추적"]');
     await page.waitForFunction(() => window.chats.B.worldinfo_tracker?.trackAt === 2);
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoOn, s.autoEvery]; }), ['p1', '한국어로 써줘', true, 3]);
-    if (shots) await page.screenshot({ path: path.join(shots, '8-setup.png') });
+    if (shots) { await page.locator('.wit-send').scrollIntoViewIfNeeded(); await page.screenshot({ path: path.join(shots, '8-setup.png') }); }
     await page.click('.wit-tabs button[data-tab=ai]');
     assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 대화 10턴/);
     await page.evaluate(() => { window.aiReply = '{"proposals":[]}'; });
