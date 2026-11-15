@@ -230,7 +230,7 @@ test('hidden messages are read; narrator lines are not', () => {
     assert.deepEqual(r.messages.map(m => m.mes), ['m0', 'm1', 'm2'], 'hidden m0..m2 read, narrator skipped, ends after the 2nd turn');
 });
 
-test('manual range: latest turns without a bookmark, capped behind one', () => {
+test('manual range: latest turns without a bookmark, everything behind one', () => {
     const chat = chatOf(20); // turns at even indexes
     const fresh = pickRange(chat, null, { every: 3, force: true });
     assert.equal(fresh.turns, 3);
@@ -238,7 +238,8 @@ test('manual range: latest turns without a bookmark, capped behind one', () => {
     assert.equal(fresh.end, 20);
     assert.equal(pickRange(chat, 20, { every: 3, force: true }), null, 'nothing new');
     const behind = pickRange(chat, 2, { every: 2, force: true });
-    assert.equal(behind.turns, 4, 'capped to 2 x every, newest');
+    assert.equal(behind.turns, pendingTurns(chat, 2), 'nothing behind the bookmark is skipped');
+    assert.ok(behind.messages[0].index >= 2);
     assert.equal(behind.messages.at(-1).mes, 'm19');
     assert.equal(pendingTurns(chat, 10), 5);
 });
@@ -327,34 +328,58 @@ test('story setup goes first in both requests, and the rules ask for every quali
 });
 
 test('duplicate control: same title merges, longer text wins, dismissed is dropped', async () => {
-    const { mergeProposals, findSameEntry, dismissKeys, normName } = await import('../core.mjs');
+    const { mergeProposals, findSameEntry, dismissKey, normName } = await import('../core.mjs');
     assert.equal(normName(' Mira (NPC) '), 'miranpc');
-    const mira = { action: 'create', id: 'a', comment: 'Mira', key: ['Mira', '미라'], content: 'short' };
-    // Same name written differently, longer text: replaces the pending card but keeps its id and keys.
-    let m = mergeProposals([mira], [{ action: 'create', id: 'b', comment: '미라', key: ['미라'], content: 'a much longer text' }]);
+    const mira = { action: 'create', id: 'a', comment: 'Mira', key: ['Mira', '미라'], content: 'short', evidence: 'quote', evidenceOk: true };
+    // Same title written with other spacing/case, longer text: replaces the pending card, keeps id, keys and quote.
+    let m = mergeProposals([mira], [{ action: 'create', id: 'b', comment: ' mira ', key: ['Mira the healer'], content: 'a much longer text' }]);
     assert.equal(m.folded, 1);
     assert.equal(m.list.length, 1);
     assert.equal(m.list[0].id, 'a');
+    assert.equal(m.list[0].comment, 'Mira', 'the first title is kept');
     assert.equal(m.list[0].content, 'a much longer text');
-    assert.deepEqual(m.list[0].key, ['Mira', '미라']);
+    assert.deepEqual(m.list[0].key, ['Mira', '미라', 'Mira the healer']);
+    assert.equal(m.list[0].evidence, 'quote');
+    assert.equal(m.list[0].evidenceOk, true, 'the check result travels with the quote');
     // A shorter repeat is dropped.
-    m = mergeProposals([mira], [{ action: 'create', id: 'c', comment: 'mira', key: [], content: 'x' }]);
+    m = mergeProposals([mira], [{ action: 'create', id: 'c', comment: 'MIRA', key: [], content: 'x' }]);
     assert.deepEqual(m.list.map(p => p.content), ['short']);
-    // A shared keyword alone is not the same thing.
+    // A title that only matches another card's keyword is a different entry: kept, marked similar.
+    const hq = { action: 'create', id: 'h', comment: 'Iron Guild HQ', key: ['Iron Guild'], content: 'hq' };
+    m = mergeProposals([hq], [{ action: 'create', id: 'g', comment: 'Iron Guild', key: [], content: 'guild' }]);
+    assert.deepEqual(m.list.map(p => [p.comment, p.similarTo]), [['Iron Guild', 'Iron Guild HQ'], ['Iron Guild HQ', undefined]]);
+    assert.equal(m.folded, 0);
+    // A shared keyword alone is nothing.
     m = mergeProposals([{ ...mira, key: ['탑'] }], [{ action: 'create', id: 'd', comment: 'Jun', key: ['탑'], content: 'jun' }]);
     assert.equal(m.list.length, 2);
-    // Two incoming copies of one character collapse to one.
+    assert.equal(m.list[0].similarTo, undefined);
+    // Two incoming copies of one title collapse to one.
     m = mergeProposals([], [{ ...mira, id: 'e' }, { ...mira, id: 'f', content: 'longer text here' }]);
     assert.equal(m.list.length, 1);
     assert.equal(m.list[0].content, 'longer text here');
-    // Dismissed names never come back.
-    assert.deepEqual(dismissKeys(mira), ['mira', '미라']);
-    m = mergeProposals([], [{ ...mira, id: 'g' }, { ...mira, id: 'h', comment: '미라' }], { dismissed: dismissKeys(mira) });
-    assert.equal(m.list.length, 0, 'every name of a dismissed card is blocked');
-    assert.equal(m.folded, 2);
-    // Existing entries are found by title or key.
+    // Dismissing blocks that title only, not entries that share a keyword.
+    assert.equal(dismissKey(hq), 'ironguildhq');
+    m = mergeProposals([], [{ ...hq, id: 'i' }, { action: 'create', id: 'j', comment: 'Iron Guild', key: [], content: 'g' }], { dismissed: [dismissKey(hq)] });
+    assert.deepEqual(m.list.map(p => p.comment), ['Iron Guild']);
+    assert.equal(m.folded, 1);
+    // A dismissed update is stored as a short fingerprint, not the whole text.
+    assert.match(dismissKey({ action: 'update', world: 'AU', uid: 1, content: 'x'.repeat(5000) }), /^AU#1#[0-9a-z]{1,8}$/);
+    // Existing entries (warning only) are found by title or key.
     assert.equal(findSameEntry({ comment: '미라', key: [] }, [{ comment: 'Mira', key: ['미라'] }])?.comment, 'Mira');
     assert.equal(findSameEntry({ comment: 'Jun', key: ['탑'] }, [{ comment: 'Mira', key: ['탑'] }]), null);
+});
+
+test('evidence check, lenient JSON, hidden messages in recent chat', async () => {
+    const { evidenceCorpus, evidenceFound } = await import('../core.mjs');
+    const corpus = evidenceCorpus(['Lena: 미라가 문을 얼렸다. 그리고 조용히 웃었다.', 'Mira is an ice Awakened of the Iron Guild.']);
+    assert.equal(evidenceFound('미라가 문을 얼렸다', corpus), true);
+    assert.equal(evidenceFound('"Mira is an ice awakened"', corpus), true, 'case and punctuation do not count');
+    assert.equal(evidenceFound('미라가 창문을 태웠다', corpus), false);
+    assert.equal(evidenceFound('Mira is an ice Awakened of the Steel Guild.', corpus), true, 'light paraphrase passes');
+    assert.equal(evidenceFound('', corpus), null);
+    assert.deepEqual(parseAiResult('Let me think {about this}. {"proposals":[]}'), { vars: [], proposals: [] });
+    const lines = recentChatLines([{ name: 'A', mes: 'hidden', is_system: true }, { name: 'N', mes: 'narrator', is_system: true, extra: { type: 'narrator' } }, { name: 'B', mes: 'new' }], 10);
+    assert.deepEqual(lines, ['A: hidden', 'B: new']);
 });
 
 test('duplicate control: a second update to the same entry is chained onto the pending one', async () => {

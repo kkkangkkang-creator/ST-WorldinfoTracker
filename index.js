@@ -8,7 +8,7 @@ import {
     freeUid, buildCopy, chatBookName, formatKeys, parseKeys, countOccurrences,
     pickDetails, buildAiMessages, buildTrackMessages, recentChatLines, parseAiResult, lineDiff, applyEdits,
     DEFAULT_EXTRA_PROMPT, DEFAULT_ASK_RULES, DEFAULT_TRACK_RULES, FORMAT_LOCKED, validVarName, findVarRefs, messageSig, relocateBookmark, pickRange, pendingTurns, formatLines, parseTagList, thinTagBlocks, splitParts, pickTrackDetails,
-    mergeProposals, findSameEntry, dismissKeys, dismissedTitles,
+    mergeProposals, findSameEntry, dismissKey, dismissedTitles, evidenceCorpus, evidenceFound,
 } from './core.mjs';
 import { POSITION_KEY, SIZE_KEY, DEFAULT_SIZE, normalizeSize, readSize, touchSize, readPosition, positionPixels, attachFloatingDrag } from './floating.mjs';
 
@@ -93,7 +93,8 @@ function chatState() {
     // Variables this extension manages. A chat holds many others (presets, other tools) that it must not touch.
     const tracked = [...new Set((Array.isArray(saved.tracked) ? saved.tracked : []).map(validVarName).filter(Boolean))];
     // Proposals the user threw away, so they are not proposed again.
-    const dismissed = (Array.isArray(saved.dismissed) ? saved.dismissed : []).filter(x => typeof x === 'string' && x).slice(0, 200);
+    // (0.10.0 stored whole entry texts for updates; those long items are dropped.)
+    const dismissed = (Array.isArray(saved.dismissed) ? saved.dismissed : []).filter(x => typeof x === 'string' && x && x.length <= 200).slice(0, 200);
     return { replaced, toggles, proposals, trackAt, trackSig, trackLast, varLog, tracked, dismissed };
 }
 async function writeChatState(update, key) {
@@ -478,7 +479,7 @@ async function openEditor(item, options = {}) {
 // ---------- AI ----------
 let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '', aiNote = '';
 // The last request as sent, for checking what the AI actually saw. Kept in memory only.
-let lastRequest = null;
+let lastRequest = null, lastRequestOpen = false, dismissedOpen = false;
 // Entries the user picked for the next request (entryKey -> title); empty = automatic.
 const aiTargets = new Map();
 // Older builds don't expose the profile service on getContext(); shared.js always has it.
@@ -518,12 +519,14 @@ async function callAi(messages, signal) {
     }
 }
 // Turns the model's proposals into cards. Only entries it saw in full may be changed.
-function buildReady(list, details, { request = '', auto = false, entries = [] } = {}) {
+function buildReady(list, details, { request = '', auto = false, entries = [], corpus = '' } = {}) {
     const detailed = new Map(details.map(e => [entryKey(e.world, e.uid), e]));
     const ready = [];
     let dropped = 0;
     for (const p of list) {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        // Whether the quoted line is really in what the AI read (null = no quote).
+        p.evidenceOk = evidenceFound(p.evidence, corpus);
         if (p.action === 'create') {
             const same = findSameEntry(p, entries);
             ready.push({ ...p, id, request, auto, sameAs: same ? entryTitle(same) : '' });
@@ -562,10 +565,12 @@ function storySetup() {
     }
     if (s.sendPersona) add(`User persona: ${c.name1 || 'User'}`, c.powerUserSettings?.persona_description);
     if (s.sendNote) {
-        add("Author's note", c.chatMetadata?.note_prompt);
+        // Interval 0 turns the chat's author's note off; a character note has its own switch.
+        if (Number(c.chatMetadata?.note_interval ?? 1) !== 0) add("Author's note", c.chatMetadata?.note_prompt);
         for (const ch of chars) {
             const file = String(ch.avatar || '').replace(/\.[^.]+$/, '');
-            add(`Character author's note: ${ch.name}`, c.extensionSettings?.note?.chara?.find(x => x.name === file)?.prompt);
+            const note = c.extensionSettings?.note?.chara?.find(x => x.name === file);
+            if (note && note.useChara !== false) add(`Character author's note: ${ch.name}`, note.prompt);
         }
     }
     return out;
@@ -584,8 +589,8 @@ async function askAi() {
         const activeKeys = new Set(result.chat === key ? result.entries.map(e => entryKey(e.world, e.uid)) : []);
         const chatLines = thinTagBlocks(recentChatLines(context().chat, settings().chatTurns), parseTagList(settings().trackTags));
         const details = pickDetails(entries, { request, activeKeys, targets: new Set(aiTargets.keys()), globals: scanGlobals() });
-        const st = chatState();
-        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), setup: storySetup(), pending: st.proposals, dismissed: dismissedTitles(st.dismissed), rules: rulesFor('ask'), extra: settings().customPrompt });
+        const st = chatState(), setup = storySetup();
+        const messages = buildAiMessages({ request, entries, details, chatLines, vars: promptVars(entries), setup, pending: st.proposals, dismissed: dismissedTitles(st.dismissed), rules: rulesFor('ask'), extra: settings().customPrompt });
         lastRequest = { kind: 'AI 탭 요청', time: Date.now(), messages, reply: '' };
         const text = await callAi(messages, controller.signal);
         if (controller.signal.aborted || key !== chatKey()) return;
@@ -593,7 +598,8 @@ async function askAi() {
         const parsed = parseAiResult(text);
         const known = trackedVarNames(entries);
         const applied = await writeVars(parsed.vars.filter(v => known.has(v.name)), 'ask', key);
-        const { ready, dropped } = buildReady(parsed.proposals, details, { request, entries });
+        const corpus = evidenceCorpus([...chatLines, ...setup.map(x => x.text)]);
+        const { ready, dropped } = buildReady(parsed.proposals, details, { request, entries, corpus });
         let folded = 0, added = 0;
         await writeChatState(st => {
             const before = st.proposals.length, m = mergeProposals(st.proposals, ready, { dismissed: st.dismissed });
@@ -647,14 +653,21 @@ async function trackChat({ manual = false } = {}) {
 
     const tags = parseTagList(s.trackTags);
     const lines = thinTagBlocks(formatLines(range.messages), tags);
-    let parts = splitParts(lines, MAX_PART_CHARS), skipped = false;
-    if (parts.length > MAX_PARTS) { parts = parts.slice(-MAX_PARTS); skipped = true; }
+    // Too long for one check: read the oldest parts now and leave the rest for the next one.
+    let parts = splitParts(lines, MAX_PART_CHARS), rest = false, readTo = range.end;
+    if (parts.length > MAX_PARTS) {
+        parts = parts.slice(0, MAX_PARTS); rest = true;
+        readTo = range.messages[parts.flat().length - 1].index + 1;
+    }
+    // Remember the last message read by its signature: messages can be deleted while the AI works.
+    const endSig = messageSig(chat[readTo - 1]);
+    const turnsRead = range.messages.filter(m => m.index < readTo && !m.is_user).length;
     const chars = parts.flat().reduce((n, line) => n + line.length, 0);
-    if (manual && chars > 60000 && !(await confirmAction('대화를 많이 읽어요', `${range.turns}턴 · 약 ${chars.toLocaleString()}자를 AI가 읽어요. 계속할까요?`))) return;
+    if (manual && chars > 60000 && !(await confirmAction('대화를 많이 읽어요', `${turnsRead}턴 · 약 ${chars.toLocaleString()}자를 AI가 읽어요. 계속할까요?`))) return;
 
     const controller = new AbortController();
     aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = '';
-    aiNote = `대화 ${range.turns}턴 · 약 ${chars.toLocaleString()}자를 읽는 중…`; render();
+    aiNote = `대화 ${turnsRead}턴 · 약 ${chars.toLocaleString()}자를 읽는 중…`; render();
     try {
         const entries = await getSortedEntries();
         const known = trackedVarNames(entries), applied = [], start = chatState();
@@ -671,7 +684,7 @@ async function trackChat({ manual = false } = {}) {
             aiRaw = reply; lastRequest.reply = reply;
             const parsed = parseAiResult(reply);
             applied.push(...await writeVars(parsed.vars.filter(v => known.has(v.name)), 'auto', key));
-            const built = buildReady(parsed.proposals, details, { auto: true, entries });
+            const built = buildReady(parsed.proposals, details, { auto: true, entries, corpus: evidenceCorpus([...part, ...setup.map(x => x.text)]) });
             const m = mergeProposals(allReady, built.ready, { dismissed: start.dismissed });
             allReady = m.list; folded += m.folded; dropped += built.dropped;
         }
@@ -679,11 +692,11 @@ async function trackChat({ manual = false } = {}) {
         await writeChatState(st => {
             const before = st.proposals.length, m = mergeProposals(st.proposals, allReady, { dismissed: st.dismissed });
             st.proposals = m.list; folded += m.folded; added = m.list.length - before;
-            st.trackAt = range.end; st.trackSig = messageSig(chat[range.end - 1]);
-            st.trackLast = { time: Date.now(), turns: range.turns, chars, parts: parts.length, vars: applied.length, proposals: added, dropped, folded, manual };
+            st.trackAt = relocateBookmark(context().chat || [], readTo, endSig) ?? readTo; st.trackSig = endSig;
+            st.trackLast = { time: Date.now(), turns: turnsRead, chars, parts: parts.length, vars: applied.length, proposals: added, dropped, folded, manual };
         }, key);
         const summary = summarize({ applied, ready: allReady.slice(0, added), dropped, folded });
-        if (summary || manual) notify(`${manual ? `대화 ${range.turns}턴을 읽었어요. ` : ''}${summary || '바꿀 게 없어요.'}${skipped ? ' (너무 길어서 앞부분은 건너뛰었어요)' : ''}`);
+        if (summary || manual || rest) notify(`${manual ? '대화를 읽었어요. ' : ''}${summary || '바꿀 게 없어요.'}${rest ? ' 너무 길어서 나머지는 다음 확인 때 이어서 읽어요.' : ''}`);
     } catch (error) {
         if (!controller.signal.aborted) {
             aiError = `대화 확인 · ${error.message || String(error)}`;
@@ -699,12 +712,16 @@ async function maybeAutoTrack() {
     if (!active || !settings().autoOn || aiBusy || isGenerating() || !chatKey()) return;
     await trackChat({ manual: false });
 }
-function cancelAi() { aiAbort?.abort(); aiBusy = false; aiAbort = null; aiNote = ''; render(); }
+function cancelAi() {
+    // A connection profile request really stops; SillyTavern's generateRaw can't be stopped from here.
+    if (aiBusy && !settings().profileId) notify('현재 채팅 API 요청은 중간에 멈출 수 없어요. 답이 와도 버리고, 비용은 나갈 수 있어요. 멈출 수 있게 하려면 설정 탭에서 연결 프로필을 고르세요.');
+    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiNote = ''; render();
+}
 async function dropProposal(id, key = chatKey(), { dismiss = false } = {}) {
     try {
         await writeChatState(s => {
             const p = s.proposals.find(x => x.id === id);
-            if (dismiss && p) { const add = dismissKeys(p); s.dismissed = [...add, ...s.dismissed.filter(x => !add.includes(x))].slice(0, 200); }
+            if (dismiss && p) { const k = dismissKey(p); s.dismissed = [k, ...s.dismissed.filter(x => x !== k)].slice(0, 200); }
             s.proposals = s.proposals.filter(x => x.id !== id);
         }, key);
     } catch (error) { notify(error.message, true); }
@@ -781,7 +798,13 @@ function proposalCard(p) {
     if (p.auto) head.append(el('span', 'wit-tag', '자동'));
     card.append(head, el('small', 'wit-muted', isCreate ? '📗 이 방 전용 책에 추가' : inChat ? '📗 이 방' : `📘 ${p.world} · 공용`));
     if (p.reason) card.append(el('p', 'wit-reason', p.reason));
-    if (p.evidence) card.append(el('blockquote', 'wit-evidence', p.evidence));
+    if (p.evidence) {
+        const quote = el('blockquote', `wit-evidence${p.evidenceOk === false ? ' is-missing' : ''}`, p.evidence);
+        quote.dataset.check = p.evidenceOk === false ? '대화에서 못 찾음' : p.evidenceOk ? '확인됨' : '';
+        quote.title = p.evidenceOk === false ? 'AI가 인용한 문장이 AI가 읽은 대화·설정에 없어요. 지어낸 내용일 수 있어요.' : '';
+        card.append(quote);
+    }
+    if (isCreate && p.similarTo) card.append(el('p', 'wit-warn', `⚠ 대기 중인 제안 "${p.similarTo}"와 이름이 겹쳐요. 같은 것이면 하나만 남기세요.`));
     if (isCreate && p.sameAs) card.append(el('p', 'wit-warn', `⚠ 이미 있는 엔트리 "${p.sameAs}"와 이름이 같아요. 그 엔트리를 고치는 게 나을 수 있어요.`));
     if (isCreate) {
         if (p.key.length || p.constant) {
@@ -875,7 +898,7 @@ function renderAi() {
     const s = settings();
     renderTargets();
     const thinking = s.profileId ? ` · 생각 ${({ min: '끔', low: '낮게', auto: '모델 기본' })[s.thinking] ?? s.thinking}` : '';
-    aiMeta.textContent = `${connectionLabel()}${thinking} · 최근 대화 ${s.chatTurns}턴`;
+    aiMeta.textContent = `${connectionLabel()}${thinking} · 최근 메시지 ${s.chatTurns}개`;
     aiSend.textContent = aiBusy ? '취소' : '보내기';
     aiSend.className = aiBusy ? 'wit-quiet' : 'wit-primary';
     body.append(trackBlock());
@@ -899,20 +922,27 @@ function aiFooter() {
     const box = el('div', 'wit-ai-foot'), st = chatState();
     if (lastRequest) {
         const sent = lastRequest.messages.map(m => m.content).join('\n\n');
-        const view = el('details', 'wit-raw');
+        const view = el('details', 'wit-raw'); view.open = lastRequestOpen;
+        view.addEventListener('toggle', () => { lastRequestOpen = view.open; });
         view.append(el('summary', '', `마지막 요청 보기 · ${lastRequest.kind} · ${since(lastRequest.time)} · 보낸 글 약 ${sent.length.toLocaleString()}자`));
         for (const m of lastRequest.messages) view.append(el('small', 'wit-muted', m.role === 'system' ? '지시문' : '보낸 자료'), el('pre', 'wit-preview', m.content));
         view.append(el('small', 'wit-muted', 'AI 답'), el('pre', 'wit-preview', lastRequest.reply || '(아직 없음)'));
         box.append(view);
     }
     if (st.dismissed.length) {
-        const row = el('div', 'wit-track-row');
-        const reset = button('비우기', async () => {
-            try { await writeChatState(s => { s.dismissed = []; }, chatKey()); } catch (error) { notify(error.message, true); }
+        const forget = async keep => {
+            try { await writeChatState(s => { s.dismissed = s.dismissed.filter(keep); }, chatKey()); } catch (error) { notify(error.message, true); }
             render();
-        }, 'wit-quiet', '버린 제안도 다시 제안받을 수 있게 해요');
-        row.append(el('small', 'wit-muted', `버린 제안 ${st.dismissed.length}개는 다시 제안하지 않아요`), reset);
-        box.append(row);
+        };
+        const view = el('details', 'wit-dismissed'); view.open = dismissedOpen;
+        view.addEventListener('toggle', () => { dismissedOpen = view.open; });
+        view.append(el('summary', '', `버린 제안 ${st.dismissed.length}개 · 다시 제안하지 않아요`));
+        const chips = el('div', 'wit-targets');
+        for (const name of dismissedTitles(st.dismissed)) chips.append(button(`${name} ×`, () => forget(x => x !== name), 'wit-target', `${name} 다시 제안받기`));
+        const updates = st.dismissed.length - dismissedTitles(st.dismissed).length;
+        if (updates) chips.append(el('small', 'wit-muted', `수정 제안 ${updates}개`));
+        view.append(chips, button('모두 비우기', () => forget(() => false), 'wit-quiet', '버린 제안도 다시 제안받을 수 있게 해요'));
+        box.append(view);
     }
     return box;
 }
@@ -1296,7 +1326,7 @@ function buildSetup() {
         el('h4', '', 'AI'),
         row('연결', profile, '', profileHint),
         row('생각', thinking, '', '모델의 생각(추론)에 쓰는 토큰. 끄면 훨씬 싸요. 연결 프로필로 요청할 때만 적용되고, 현재 채팅 API는 SillyTavern 설정을 따라요.'),
-        row('최근 대화', turns, '턴', 'AI에게 같이 보낼 최근 메시지 수. 요청 비용의 큰 부분이에요.'),
+        row('최근 메시지', turns, '개', 'AI 탭 요청에 같이 보낼 최근 메시지 수(유저·캐릭터 합쳐서). 숨긴 메시지도 포함해요. 요청 비용의 큰 부분이에요.'),
         row('보낼 자료', sendBox, '', 'AI 탭 요청과 자동 추적에 배경 자료로 같이 보내요. 카드·노트에만 적힌 인물이나 능력도 엔트리에 반영할 수 있게 돼요. 길이만큼 요청마다 토큰이 들어요(항목당 최대 8000자).'),
         row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
         el('h4', '', '자동 추적'),

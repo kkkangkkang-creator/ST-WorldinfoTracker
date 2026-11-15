@@ -58,6 +58,11 @@ dialog.wit-dialog textarea.wit-content { flex:1 1 auto; min-height:160px; line-h
 .wit-badge[hidden] { display:none; }
 .wit-evidence { margin:4px 0 6px; padding:2px 0 2px 8px; border-left:2px solid var(--wit-rule); color:var(--wit-muted); font-size:12px; font-style:italic; overflow-wrap:anywhere; }
 .wit-evidence::before { content:'근거 '; font-style:normal; font-weight:600; }
+.wit-evidence[data-check]:not([data-check=""])::after { content:' · ' attr(data-check); font-style:normal; font-size:11px; color:var(--wit-green); }
+.wit-evidence.is-missing { border-left-color:var(--wit-red); }
+.wit-evidence.is-missing[data-check]:not([data-check=""])::after { color:var(--wit-red); font-weight:600; }
+.wit-dismissed summary { cursor:pointer; font-size:11.5px; color:var(--wit-muted); }
+.wit-dismissed .wit-targets { margin:6px 0; }
 .wit-warn { margin:4px 0; padding:5px 8px; border:1px solid var(--wit-red); color:var(--wit-red); font-size:12px; background:#fdf3ef; }
 .wit-ai-foot { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
 .wit-ai-foot pre { max-height:260px; overflow:auto; }

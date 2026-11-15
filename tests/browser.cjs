@@ -270,11 +270,12 @@ window.chats = chats; window.store = store;
     await page.waitForSelector('.wit-error');
     assert.equal(await page.inputValue('.wit-ask-input'), '아무거나');
 
-    // 10b. Duplicates: two spellings of one character fold into one card; a repeat folds into it;
-    // a dismissed one never comes back; the last request can be inspected.
+    // 10b. Duplicates: one title written two ways folds into one card; a repeat folds into it;
+    // a dismissed one never comes back; the quote is checked; the last request can be inspected.
     const mira = [
-        { action: 'create', comment: '미라', keys: ['미라'], content: '- Ice ability.', reason: '새 인물', evidence: '미라가 문을 얼렸다.' },
-        { action: 'create', comment: 'Mira', keys: ['Mira', '미라'], content: '- Ice ability.\n- Guild healer.', reason: '새 인물' },
+        { action: 'create', comment: 'Mira', keys: ['미라'], content: '- Ice ability.', reason: '새 인물', evidence: 'NPC Mira: ice ability.' },
+        { action: 'create', comment: ' mira ', keys: ['Mira'], content: '- Ice ability.\n- Guild healer.', reason: '새 인물' },
+        { action: 'create', comment: 'Mira HQ', keys: [], content: '- Base.', reason: '장소', evidence: 'Mira built a castle on the moon.' },
     ];
     const askMira = async () => {
         await page.evaluate(r => { window.aiReply = JSON.stringify({ proposals: r }); window.aiPrompt = null; }, mira);
@@ -283,23 +284,38 @@ window.chats = chats; window.store = store;
         await page.waitForFunction(() => window.aiPrompt && !document.querySelector('.wit-ask-row button.wit-quiet'));
     };
     await askMira();
-    assert.equal(await page.$$eval('.wit-card', c => c.length), 1);
-    assert.match(await page.textContent('.wit-card pre'), /Guild healer/, 'the longer text wins');
-    assert.equal(await page.textContent('.wit-card .wit-evidence'), '미라가 문을 얼렸다.');
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 2, 'Mira folds into one card; Mira HQ stays separate');
+    const miraCard = '.wit-card:has(strong:text-is("Mira"))';
+    assert.match(await page.textContent(`${miraCard} pre`), /Guild healer/, 'the longer text wins');
+    assert.equal(await page.textContent(`${miraCard} .wit-evidence`), 'NPC Mira: ice ability.');
+    assert.equal(await page.getAttribute(`${miraCard} .wit-evidence`, 'data-check'), '확인됨', 'the quote is in the author\'s note');
+    assert.equal(await page.getAttribute('.wit-card:has-text("Mira HQ") .wit-evidence', 'data-check'), '대화에서 못 찾음', 'an invented quote is flagged');
+    assert.equal(await page.$eval('.wit-card:has-text("Mira HQ") .wit-evidence', q => getComputedStyle(q, '::after').color), 'rgb(155, 44, 28)', 'flagged in red');
+    await page.click('.wit-card:has-text("Mira HQ") button >> text=버리기');
+    await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 1);
+    await page.evaluate(async () => { await window.eventSource.emit('CHAT_CHANGED'); }); // start from a clean dismissed list below
+    await page.evaluate(() => { window.chats.B.worldinfo_tracker.dismissed = []; });
     await askMira();
-    assert.equal(await page.$$eval('.wit-card', c => c.length), 1, 'a repeat folds into the pending card');
-    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## PENDING[^\n]*\n\ncreate \| Mira \| 미라, Mira/);
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 2, 'a repeat folds into the pending card');
+    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## PENDING[^\n]*\n\n(create \| [^\n]*\n)*create \| Mira \| 미라, Mira/);
+    await page.click('.wit-card:has-text("Mira HQ") button >> text=버리기');
+    await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 1);
     await page.click('.wit-ai-foot summary');
     assert.match(await page.textContent('.wit-ai-foot'), /마지막 요청 보기 · AI 탭 요청[\s\S]*## PENDING/);
     await page.click('.wit-card button >> text=버리기');
     await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 0);
-    assert.deepEqual(await page.evaluate(() => window.chats.B.worldinfo_tracker.dismissed), ['mira', '미라']);
+    assert.deepEqual(await page.evaluate(() => window.chats.B.worldinfo_tracker.dismissed), ['mira', 'mirahq']);
     await askMira();
-    assert.equal(await page.$$eval('.wit-card', c => c.length), 0, 'a dismissed proposal does not come back');
-    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## DISMISSED[^\n]*\n\nmira/);
-    await page.click('.wit-ai-foot button >> text=비우기');
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 0, 'dismissed proposals do not come back');
+    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## DISMISSED[^\n]*\n\nmira\nmirahq/);
+    // The dismissed list can be cleared one name at a time.
+    await page.click('.wit-dismissed > summary');
+    await page.click('.wit-dismissed button >> text=mirahq ×');
+    await page.waitForFunction(() => window.chats.B.worldinfo_tracker.dismissed.join() === 'mira');
+    assert.ok(await page.$('.wit-dismissed[open]'), 'the list stays open after a re-render');
+    await page.click('.wit-dismissed button >> text=모두 비우기');
     await page.waitForFunction(() => window.chats.B.worldinfo_tracker.dismissed.length === 0);
-    if (shots) { await askMira(); await page.screenshot({ path: path.join(shots, '7b-dupes.png') }); await page.click('.wit-card button >> text=버리기'); await page.click('.wit-ai-foot button >> text=비우기'); }
+    if (shots) { await askMira(); await page.screenshot({ path: path.join(shots, '7b-dupes.png') }); for (let i = 0; i < 2; i++) await page.click('.wit-card >> nth=0 >> button >> text=버리기'); await page.click('.wit-dismissed button >> text=모두 비우기'); }
 
     // 11. Settings tab: profile list falls back to shared.js, extra instructions reach the AI.
     await page.click('.wit-tabs button[data-tab=setup]');
@@ -326,7 +342,7 @@ window.chats = chats; window.store = store;
     assert.deepEqual(await page.evaluate(() => { const s = window.extensionSettings.worldinfo_tracker; return [s.profileId, s.customPrompt, s.autoOn, s.autoEvery]; }), ['p1', '한국어로 써줘', true, 3]);
     if (shots) { await page.locator('.wit-send').scrollIntoViewIfNeeded(); await page.screenshot({ path: path.join(shots, '8-setup.png') }); }
     await page.click('.wit-tabs button[data-tab=ai]');
-    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 대화 10턴/);
+    assert.match(await page.textContent('.wit-ask-row small'), /Flash · 생각 끔 · 최근 메시지 10개/);
     await page.evaluate(() => { window.aiReply = '{"proposals":[]}'; });
     await page.fill('.wit-ask-input', '확인');
     await page.click('.wit-ask-row button >> text=보내기');
@@ -435,6 +451,24 @@ window.chats = chats; window.store = store;
     assert.ok(again.includes('B lena 1') && again.includes('A lena 2') && !again.includes('A lena 0'), 'the latest 3 turns');
     await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
     await page.evaluate(() => { window.confirmAnswer = 1; });
+    // A backlog longer than one check can read: the oldest part now, the rest next time, nothing skipped.
+    await page.evaluate(() => {
+        for (let i = 0; i < 60; i++) { const k = window.chat.length; window.chat.push({ name: 'User', is_user: true, mes: 'L user ' + i, send_date: 'lu' + k }, { name: 'Lena', mes: 'L lena ' + i + ' ' + 'x'.repeat(4000), send_date: 'll' + k }); }
+    });
+    const before = await page.evaluate(() => window.chats.B.worldinfo_tracker.trackLast.time);
+    await page.click('.wit-track button >> text=지금 확인');
+    await page.waitForFunction(t => window.chats.B.worldinfo_tracker.trackLast.time !== t, before);
+    let backlog = await page.evaluate(() => ({ at: window.chats.B.worldinfo_tracker.trackAt, len: window.chat.length, last: window.chats.B.worldinfo_tracker.trackLast }));
+    assert.ok(backlog.at < backlog.len, 'the bookmark stops where reading stopped');
+    assert.equal(backlog.last.parts, 5);
+    assert.ok(backlog.last.turns > 0 && backlog.last.turns < 60);
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+    await page.click('.wit-track button >> text=지금 확인');
+    await page.waitForFunction(t => window.chats.B.worldinfo_tracker.trackLast.time !== t, backlog.last.time);
+    const second = await page.evaluate(() => window.chats.B.worldinfo_tracker.trackLast);
+    assert.equal(backlog.last.turns + second.turns, 60, 'the two checks together read every turn once');
+    assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.trackAt), await page.evaluate(() => window.chat.length));
+    await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
 
     // 15. "기본값으로" brings the built-in rules back.
     await page.click('.wit-tabs button[data-tab=setup]');

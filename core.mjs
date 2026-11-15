@@ -319,7 +319,8 @@ export function buildTrackMessages({ lines, vars = {}, entries, details, setup =
 }
 
 export function recentChatLines(chat, turns, maxChars = 2000) {
-    return (Array.isArray(chat) ? chat : []).filter(x => x && !x.is_system).slice(-Math.max(0, turns))
+    // Hidden messages (summary extensions) still count; narrator/system lines don't.
+    return (Array.isArray(chat) ? chat : []).filter(isReadable).slice(-Math.max(0, turns))
         .map(x => `${x.name}: ${clip(String(x.mes ?? '').trim(), maxChars)}`);
 }
 
@@ -342,12 +343,16 @@ export function normalizeVars(list) {
 /** Reads the model's JSON; tolerates code fences and stray text around it. */
 export function parseAiResult(text) {
     const raw = String(text ?? '').replace(/```(?:json)?/gi, '');
-    const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
-    if (start < 0 || end <= start) {
+    const end = raw.lastIndexOf('}');
+    if (raw.indexOf('{') < 0 || end < 0) {
         throw new Error('AI 응답에서 JSON을 찾지 못했어요. 응답이 중간에 잘렸을 수 있어요. 생각(추론)하는 모델은 생각에도 토큰을 써서, 설정 탭의 최대 토큰을 늘리면 해결될 때가 많아요.');
     }
+    // Models sometimes write a sentence with braces before the JSON; try each "{" in turn.
     let data;
-    try { data = JSON.parse(raw.slice(start, end + 1)); } catch { throw new Error('AI 응답의 JSON 형식이 깨져 있어요.'); }
+    for (let start = raw.indexOf('{'), tries = 0; start >= 0 && start < end && tries < 40; start = raw.indexOf('{', start + 1), tries++) {
+        try { data = JSON.parse(raw.slice(start, end + 1)); break; } catch {}
+    }
+    if (data === undefined) throw new Error('AI 응답의 JSON 형식이 깨져 있어요.');
     const list = Array.isArray(data) ? data : data?.proposals;
     if (!Array.isArray(list)) throw new Error('AI 응답에 proposals 목록이 없어요.');
     const editsOf = p => (Array.isArray(p.edits) ? p.edits : [])
@@ -455,7 +460,8 @@ export function relocateBookmark(chat, at, sig) {
  * The part of the chat to read next. A "turn" is a character message.
  * Automatic: once `every` turns plus `hold` newest turns have piled up behind the
  * bookmark, read the first `every`; the newest turns wait so a swipe cannot leak in.
- * Manual (force): read everything after the bookmark (at most 2x `every` turns, newest);
+ * Manual (force): read everything after the bookmark (the caller splits a long range and
+ * moves the bookmark only past what it read, so nothing is skipped);
  * with no bookmark, the latest `every` turns.
  */
 export function pickRange(chat, at, { every, hold = 2, force = false } = {}) {
@@ -474,11 +480,7 @@ export function pickRange(chat, at, { every, hold = 2, force = false } = {}) {
             for (let i = 0; i < list.length; i++) if (isTurn(list[i])) all.push(i);
             if (!all.length) return null;
             start = all[Math.max(0, all.length - every)];
-        } else {
-            if (!turns.length) return null;
-            const cap = every * 2;
-            if (turns.length > cap) start = turns[turns.length - cap];
-        }
+        } else if (!turns.length) return null;
         // Start at the user message that prompted the first turn, if there is one.
         for (let j = start - 1; j >= 0; j--) {
             if (!isReadable(list[j])) continue;
@@ -568,25 +570,31 @@ const sameThing = (title, other) => {
     const t = normName(title);
     return Boolean(t) && (normName(other.comment) === t || keyList(other.key).some(k => normName(k) === t));
 };
-/** The existing entry a new-entry proposal duplicates, if any. */
+const sameTitle = (a, b) => Boolean(normName(a.comment)) && normName(a.comment) === normName(b.comment);
+/** The existing entry a new-entry proposal may duplicate (title or key match), for a warning only. */
 export function findSameEntry(p, entries) {
     return entries.find(e => sameThing(p.comment, e) || sameThing(e.comment, p)) ?? null;
 }
-const updateSig = p => `${p.world}#${p.uid}#${normName(p.content)}`;
-/** What the dismissed list stores for a proposal the user threw away: every name of a new entry. */
-export function dismissKeys(p) {
-    if (p.action !== 'create') return [updateSig(p)];
-    return [...new Set([p.comment, ...keyList(p.key)].map(normName).filter(Boolean))];
+// Short fingerprint, so a dismissed update doesn't store the whole entry text.
+function fingerprint(text) {
+    let h = 0x811c9dc5;
+    for (const ch of normName(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(36);
 }
-// A new entry is dismissed when its title is one of the dismissed names.
-const isDismissed = (p, gone) => gone.has(p.action === 'create' ? normName(p.comment) : updateSig(p));
-/** Human-readable form for the prompt; update signatures are not worth sending. */
+const updateSig = p => `${p.world}#${p.uid}#${fingerprint(p.content)}`;
+/** What the dismissed list stores for a proposal the user threw away: a new entry's title, or an update's fingerprint. */
+export function dismissKey(p) {
+    return p.action === 'create' ? normName(p.comment) : updateSig(p);
+}
+const isDismissed = (p, gone) => gone.has(dismissKey(p));
+/** Dismissed new-entry titles; update fingerprints are not worth showing or sending. */
 export function dismissedTitles(list) {
     return (Array.isArray(list) ? list : []).filter(x => typeof x === 'string' && !x.includes('#'));
 }
 /**
  * Adds incoming proposals to the pending ones without duplicates.
- * - A new entry with the title of a pending one replaces it when longer, otherwise is dropped.
+ * - A new entry with the same title as a pending one replaces it when longer, otherwise is dropped.
+ *   One whose title only matches another card's keyword is kept, marked "similarTo".
  * - An update to an entry with a pending update is chained onto it when its edits still apply.
  * - Anything the user dismissed is dropped.
  * Returns the merged list (newest first) and how many incoming proposals were folded or dropped.
@@ -597,14 +605,18 @@ export function mergeProposals(pending, incoming, { dismissed = [] } = {}) {
     for (const p of incoming) {
         if (isDismissed(p, gone)) { folded++; continue; }
         if (p.action === 'create') {
-            const i = list.findIndex(q => q.action === 'create' && (sameThing(p.comment, q) || sameThing(q.comment, p)));
-            const j = fresh.findIndex(q => q.action === 'create' && (sameThing(p.comment, q) || sameThing(q.comment, p)));
+            const i = list.findIndex(q => q.action === 'create' && sameTitle(p, q));
+            const j = fresh.findIndex(q => q.action === 'create' && sameTitle(p, q));
             const [arr, at] = j >= 0 ? [fresh, j] : [list, i];
-            if (at < 0) { fresh.push(p); continue; }
+            if (at < 0) {
+                const near = [...fresh, ...list].find(q => q.action === 'create' && (sameThing(p.comment, q) || sameThing(q.comment, p)));
+                fresh.push(near ? { ...p, similarTo: near.comment } : p);
+                continue;
+            }
             folded++;
             const old = arr[at];
             if (String(p.content).length > String(old.content).length) {
-                arr[at] = { ...p, id: old.id, key: [...new Set([...keyList(old.key), ...keyList(p.key)])], evidence: p.evidence || old.evidence, reason: p.reason || old.reason };
+                arr[at] = { ...p, id: old.id, comment: old.comment, key: [...new Set([...keyList(old.key), ...keyList(p.key)])], ...(p.evidence ? {} : { evidence: old.evidence, evidenceOk: old.evidenceOk }), reason: p.reason || old.reason };
             }
             continue;
         }
@@ -618,7 +630,25 @@ export function mergeProposals(pending, incoming, { dismissed = [] } = {}) {
         const { content, missing } = applyEdits(old.content, p.edits);
         if (missing.length || content === old.content) continue;
         arr[at] = { ...old, content, reason: [old.reason, p.reason].filter(Boolean).join(' / '),
-            evidence: old.evidence || p.evidence, vars: [...(old.vars || []), ...(p.vars || [])] };
+            ...(old.evidence ? {} : { evidence: p.evidence, evidenceOk: p.evidenceOk }), vars: [...(old.vars || []), ...(p.vars || [])] };
     }
     return { list: [...fresh, ...list], folded };
+}
+
+// ---------- Evidence check ----------
+/** Comparable text for evidence search, built once per request. */
+export const evidenceCorpus = texts => normName((Array.isArray(texts) ? texts : [texts]).join('\n'));
+/**
+ * Whether a quoted line really appears in what the AI read. Light paraphrase is allowed:
+ * most 10-character pieces of the quote must be found.
+ * @returns {boolean|null} null when there is no quote.
+ */
+export function evidenceFound(evidence, corpus) {
+    const q = normName(evidence);
+    if (!q) return null;
+    if (corpus.includes(q)) return true;
+    if (q.length < 20) return false;
+    const chars = [...q], size = 10, pieces = [];
+    for (let i = 0; i + size <= chars.length; i += size) pieces.push(chars.slice(i, i + size).join(''));
+    return pieces.filter(x => corpus.includes(x)).length / pieces.length >= 0.6;
 }
