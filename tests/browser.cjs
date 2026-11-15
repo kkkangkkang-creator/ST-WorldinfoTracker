@@ -270,6 +270,37 @@ window.chats = chats; window.store = store;
     await page.waitForSelector('.wit-error');
     assert.equal(await page.inputValue('.wit-ask-input'), '아무거나');
 
+    // 10b. Duplicates: two spellings of one character fold into one card; a repeat folds into it;
+    // a dismissed one never comes back; the last request can be inspected.
+    const mira = [
+        { action: 'create', comment: '미라', keys: ['미라'], content: '- Ice ability.', reason: '새 인물', evidence: '미라가 문을 얼렸다.' },
+        { action: 'create', comment: 'Mira', keys: ['Mira', '미라'], content: '- Ice ability.\n- Guild healer.', reason: '새 인물' },
+    ];
+    const askMira = async () => {
+        await page.evaluate(r => { window.aiReply = JSON.stringify({ proposals: r }); window.aiPrompt = null; }, mira);
+        await page.fill('.wit-ask-input', '미라 추가');
+        await page.click('.wit-ask-row button >> text=보내기');
+        await page.waitForFunction(() => window.aiPrompt && !document.querySelector('.wit-ask-row button.wit-quiet'));
+    };
+    await askMira();
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 1);
+    assert.match(await page.textContent('.wit-card pre'), /Guild healer/, 'the longer text wins');
+    assert.equal(await page.textContent('.wit-card .wit-evidence'), '미라가 문을 얼렸다.');
+    await askMira();
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 1, 'a repeat folds into the pending card');
+    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## PENDING[^\n]*\n\ncreate \| Mira \| 미라, Mira/);
+    await page.click('.wit-ai-foot summary');
+    assert.match(await page.textContent('.wit-ai-foot'), /마지막 요청 보기 · AI 탭 요청[\s\S]*## PENDING/);
+    await page.click('.wit-card button >> text=버리기');
+    await page.waitForFunction(() => document.querySelectorAll('.wit-card').length === 0);
+    assert.deepEqual(await page.evaluate(() => window.chats.B.worldinfo_tracker.dismissed), ['mira', '미라']);
+    await askMira();
+    assert.equal(await page.$$eval('.wit-card', c => c.length), 0, 'a dismissed proposal does not come back');
+    assert.match(await page.evaluate(() => window.aiPrompt[1].content), /## DISMISSED[^\n]*\n\nmira/);
+    await page.click('.wit-ai-foot button >> text=비우기');
+    await page.waitForFunction(() => window.chats.B.worldinfo_tracker.dismissed.length === 0);
+    if (shots) { await askMira(); await page.screenshot({ path: path.join(shots, '7b-dupes.png') }); await page.click('.wit-card button >> text=버리기'); await page.click('.wit-ai-foot button >> text=비우기'); }
+
     // 11. Settings tab: profile list falls back to shared.js, extra instructions reach the AI.
     await page.click('.wit-tabs button[data-tab=setup]');
     await page.waitForSelector('.wit-setup:not([hidden])');

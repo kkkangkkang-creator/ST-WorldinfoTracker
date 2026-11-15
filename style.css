@@ -56,6 +56,11 @@ dialog.wit-dialog textarea.wit-content { flex:1 1 auto; min-height:160px; line-h
 /* The icon lives outside the panel, so the badge spells out its colors instead of using the panel tokens. */
 .wit-badge { position:absolute; top:-7px; right:-9px; min-width:18px; height:18px; padding:0 4px; border-radius:2px; background:#9b2c1c!important; color:#ffffff!important; box-shadow:0 0 0 1.5px #ffffff; font-size:11px; line-height:18px; font-weight:700; text-align:center; pointer-events:none; }
 .wit-badge[hidden] { display:none; }
+.wit-evidence { margin:4px 0 6px; padding:2px 0 2px 8px; border-left:2px solid var(--wit-rule); color:var(--wit-muted); font-size:12px; font-style:italic; overflow-wrap:anywhere; }
+.wit-evidence::before { content:'근거 '; font-style:normal; font-weight:600; }
+.wit-warn { margin:4px 0; padding:5px 8px; border:1px solid var(--wit-red); color:var(--wit-red); font-size:12px; background:#fdf3ef; }
+.wit-ai-foot { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+.wit-ai-foot pre { max-height:260px; overflow:auto; }
 .wit-send { display:flex; flex-wrap:wrap; gap:4px 14px; }
 .wit-send .checkbox_label { display:flex; align-items:center; gap:5px; margin:0; }
 .wit-launcher-icon { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; filter:drop-shadow(0 1px 2px rgba(0,0,0,.25)); }

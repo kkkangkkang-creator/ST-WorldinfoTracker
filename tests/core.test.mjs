@@ -145,7 +145,7 @@ test('AI replies are parsed leniently and validated', () => {
         '{"action":"update","world":"AU","uid":2,"content":"9 days"},{"action":"delete","content":"x"},{"action":"create","content":"  "}]}\n```';
     const list = parseProposals(reply);
     assert.equal(list.length, 2);
-    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', edits: [], vars: [], reason: '요청' });
+    assert.deepEqual(list[0], { action: 'create', world: '', uid: null, comment: '균열', key: ['균열', 'rift'], constant: false, content: '## Rifts', edits: [], vars: [], reason: '요청', evidence: '' });
     assert.equal(list[1].world, 'AU');
     assert.equal(list[1].uid, 2);
     assert.throws(() => parseProposals('no json here'), /JSON을 찾지/);
@@ -292,7 +292,7 @@ test('tracker messages and prompts', () => {
     assert.match(system.content, /report the lasting changes/);
     assert.match(system.content, /Additional instructions[^\n]*\n한국어로$/);
     assert.match(user.content, /## CURRENT VALUES \(variable = value\)\n\n클리어_층 = 1/);
-    assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d \| keyword/);
+    assert.match(user.content, /AU \| 1 \| 소렌 \| a, b, c, d, e \| keyword/);
     assert.match(buildTrackMessages({ lines: [], vars: { 새값: '' }, entries: [], details: [] })[1].content, /새값 = \(not set\)/);
     assert.match(user.content, /## NEW CHAT \(oldest first\) - part 2 of 3\n\nLena: hi$/);
     for (const prompt of [AI_SYSTEM_PROMPT, TRACK_SYSTEM_PROMPT]) assert.match(prompt, /\{\{getvar::name\}\}/);
@@ -324,4 +324,58 @@ test('story setup goes first in both requests, and the rules ask for every quali
         assert.match(rules, /never stop after the first/);
         assert.match(rules, /At most 10 proposals/);
     }
+});
+
+test('duplicate control: same title merges, longer text wins, dismissed is dropped', async () => {
+    const { mergeProposals, findSameEntry, dismissKeys, normName } = await import('../core.mjs');
+    assert.equal(normName(' Mira (NPC) '), 'miranpc');
+    const mira = { action: 'create', id: 'a', comment: 'Mira', key: ['Mira', '미라'], content: 'short' };
+    // Same name written differently, longer text: replaces the pending card but keeps its id and keys.
+    let m = mergeProposals([mira], [{ action: 'create', id: 'b', comment: '미라', key: ['미라'], content: 'a much longer text' }]);
+    assert.equal(m.folded, 1);
+    assert.equal(m.list.length, 1);
+    assert.equal(m.list[0].id, 'a');
+    assert.equal(m.list[0].content, 'a much longer text');
+    assert.deepEqual(m.list[0].key, ['Mira', '미라']);
+    // A shorter repeat is dropped.
+    m = mergeProposals([mira], [{ action: 'create', id: 'c', comment: 'mira', key: [], content: 'x' }]);
+    assert.deepEqual(m.list.map(p => p.content), ['short']);
+    // A shared keyword alone is not the same thing.
+    m = mergeProposals([{ ...mira, key: ['탑'] }], [{ action: 'create', id: 'd', comment: 'Jun', key: ['탑'], content: 'jun' }]);
+    assert.equal(m.list.length, 2);
+    // Two incoming copies of one character collapse to one.
+    m = mergeProposals([], [{ ...mira, id: 'e' }, { ...mira, id: 'f', content: 'longer text here' }]);
+    assert.equal(m.list.length, 1);
+    assert.equal(m.list[0].content, 'longer text here');
+    // Dismissed names never come back.
+    assert.deepEqual(dismissKeys(mira), ['mira', '미라']);
+    m = mergeProposals([], [{ ...mira, id: 'g' }, { ...mira, id: 'h', comment: '미라' }], { dismissed: dismissKeys(mira) });
+    assert.equal(m.list.length, 0, 'every name of a dismissed card is blocked');
+    assert.equal(m.folded, 2);
+    // Existing entries are found by title or key.
+    assert.equal(findSameEntry({ comment: '미라', key: [] }, [{ comment: 'Mira', key: ['미라'] }])?.comment, 'Mira');
+    assert.equal(findSameEntry({ comment: 'Jun', key: ['탑'] }, [{ comment: 'Mira', key: ['탑'] }]), null);
+});
+
+test('duplicate control: a second update to the same entry is chained onto the pending one', async () => {
+    const { mergeProposals } = await import('../core.mjs');
+    const first = { action: 'update', id: 'u1', world: 'AU', uid: 3, content: 'Rank: E\nAffiliation: None', edits: [], reason: 'rank' };
+    let m = mergeProposals([first], [{ action: 'update', id: 'u2', world: 'AU', uid: 3, edits: [{ find: 'Affiliation: None', replace: 'Affiliation: Guild' }], reason: 'joined' }]);
+    assert.equal(m.list.length, 1);
+    assert.equal(m.list[0].content, 'Rank: E\nAffiliation: Guild');
+    assert.equal(m.list[0].reason, 'rank / joined');
+    // Edits that no longer fit are folded away rather than producing a second card.
+    m = mergeProposals([first], [{ action: 'update', id: 'u3', world: 'AU', uid: 3, edits: [{ find: 'nothing', replace: 'x' }] }]);
+    assert.deepEqual(m.list.map(p => p.content), [first.content]);
+});
+
+test('pending and dismissed go into both requests; evidence is parsed', () => {
+    const pending = [{ action: 'create', comment: 'Mira', key: ['미라'] }, { action: 'update', world: 'AU', uid: 3, title: 'Jun' }];
+    const track = buildTrackMessages({ lines: ['x'], entries: [], details: [], pending, dismissed: ['Old Guy'] })[1].content;
+    assert.match(track, /## PENDING \(proposed, waiting for the user\)\n\ncreate \| Mira \| 미라\nupdate \| AU \| 3 \| Jun\n\n## DISMISSED \(rejected by the user\)\n\nOld Guy\n\n## NEW CHAT/);
+    const ask = buildAiMessages({ request: 'r', entries: [], details: [] })[1].content;
+    assert.match(ask, /## PENDING[^\n]*\n\n\(none\)/);
+    assert.match(FORMAT_LOCKED, /Never propose those again/);
+    const [p] = parseAiResult('{"proposals":[{"action":"create","comment":"Mira","content":"x","evidence":"  Mira froze the door.  "}]}').proposals;
+    assert.equal(p.evidence, 'Mira froze the door.');
 });

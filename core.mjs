@@ -161,13 +161,15 @@ export function countOccurrences(text, needle) {
 export const FORMAT_LOCKED = `Reply with JSON only, no other text, in exactly this shape:
 {"vars":[{"name":"exact variable name","value":"new value","reason":"why"}],
  "proposals":[
- {"action":"update","world":"book name","uid":12,"edits":[{"find":"exact text from the entry","replace":"new text"}],"vars":[{"name":"new variable","value":"its current value"}],"reason":"why"},
- {"action":"create","comment":"title","keys":["keyword"],"constant":false,"content":"entry text","reason":"why"}
+ {"action":"update","world":"book name","uid":12,"edits":[{"find":"exact text from the entry","replace":"new text"}],"vars":[{"name":"new variable","value":"its current value"}],"reason":"why","evidence":"short quote"},
+ {"action":"create","comment":"title","keys":["keyword"],"constant":false,"content":"entry text","reason":"why","evidence":"short quote"}
 ]}
 
 Format notes:
 - "edits": each "find" is copied character for character from that entry and is replaced everywhere it occurs. Give "content" (the complete new text) instead of "edits" only for a rewrite of most of the entry. "comment" and "keys" are optional on an update.
 - Top-level "vars" sets variables by their exact names. A proposal's own "vars" lists the variables its edits introduce, with their current values.
+- "evidence": a short exact quote (under 150 characters) from the chat or STORY SETUP that supports the proposal. Leave it empty only when the user's request alone is the reason.
+- PENDING lists proposals already waiting for the user; DISMISSED lists ones the user rejected. Never propose those again. To add facts to a pending new entry, repeat its "create" with the exact same title and the complete text.
 - If nothing should change, return {"vars":[],"proposals":[]}.`;
 
 // Pre-filled into the "추가 지시" setting once; the user can edit or delete it.
@@ -282,28 +284,35 @@ export function pickDetails(entries, { request = '', activeKeys = new Set(), tar
     return picked;
 }
 
-const entryList = entries => entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).slice(0, 4).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
+const entryList = entries => entries.map(e => `${e.world} | ${e.uid} | ${String(e.comment || '').replace(/\s+/g, ' ')} | ${keyList(e.key).slice(0, 12).join(', ')} | ${e.constant ? 'constant' : 'keyword'}${e.disable ? ', off' : ''}`);
 const entryBodies = details => details.map(e => `### [${e.world} #${e.uid}] ${e.comment || ''}\n${e.content || ''}`);
 const setupText = setup => (Array.isArray(setup) ? setup : []).filter(x => x?.text).map(x => `### ${x.label}\n${x.text}`).join('\n\n');
+const pendingText = (pending = [], dismissed = []) => [
+    '## PENDING (proposed, waiting for the user)',
+    pending.map(p => p.action === 'create' ? `create | ${p.comment} | ${keyList(p.key).slice(0, 12).join(', ')}` : `update | ${p.world} | ${p.uid} | ${p.title || p.comment || ''}`).join('\n') || '(none)',
+    '## DISMISSED (rejected by the user)', dismissed.join('\n') || '(none)',
+];
 const valueList = vars => Object.entries(vars || {}).map(([k, v]) => `${k} = ${v === '' ? '(not set)' : v}`);
-export function buildAiMessages({ request, entries, details, chatLines = [], vars = {}, setup = [], rules = DEFAULT_ASK_RULES, extra = '' }) {
+export function buildAiMessages({ request, entries, details, chatLines = [], vars = {}, setup = [], pending = [], dismissed = [], rules = DEFAULT_ASK_RULES, extra = '' }) {
     const user = [
         '## STORY SETUP', setupText(setup) || '(none)',
         '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
         '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
         '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',
+        ...pendingText(pending, dismissed),
         '## RECENT CHAT (oldest first)', chatLines.join('\n') || '(none)',
         '## REQUEST', request,
     ].join('\n\n');
     return [{ role: 'system', content: buildSystemPrompt(rules, extra) }, { role: 'user', content: user }];
 }
 
-export function buildTrackMessages({ lines, vars = {}, entries, details, setup = [], rules = DEFAULT_TRACK_RULES, extra = '', part = null }) {
+export function buildTrackMessages({ lines, vars = {}, entries, details, setup = [], pending = [], dismissed = [], rules = DEFAULT_TRACK_RULES, extra = '', part = null }) {
     const user = [
         '## STORY SETUP', setupText(setup) || '(none)',
         '## CURRENT VALUES (variable = value)', valueList(vars).join('\n') || '(none)',
         '## ENTRY LIST (world | uid | title | keys | type)', entryList(entries).join('\n') || '(none)',
         '## ENTRY DETAILS', entryBodies(details).join('\n\n') || '(none)',
+        ...pendingText(pending, dismissed),
         `## NEW CHAT (oldest first)${part ? ` - part ${part.i} of ${part.n}` : ''}`, lines.join('\n\n') || '(none)',
     ].join('\n\n');
     return [{ role: 'system', content: buildSystemPrompt(rules, extra) }, { role: 'user', content: user }];
@@ -357,6 +366,7 @@ export function parseAiResult(text) {
             edits: hasContent(p) ? [] : editsOf(p),
             vars: normalizeVars(p.vars),
             reason: String(p.reason ?? '').trim(),
+            evidence: String(p.evidence ?? '').trim().slice(0, 300),
         }));
     return { vars: Array.isArray(data) ? [] : normalizeVars(data?.vars), proposals };
 }
@@ -545,4 +555,70 @@ export function pickTrackDetails(entries, text, { budget = 16000, globals = { ca
         seen.add(k); picked.push(e); used += size;
     }
     return picked;
+}
+
+// ---------- Duplicate control ----------
+/** Comparable form of a name: case, spaces and punctuation don't count. */
+export function normName(text) {
+    return String(text ?? '').normalize('NFC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+// A title is matched against titles and keys. Keys alone are never compared with each other:
+// shared keywords like "탑" would merge unrelated entries.
+const sameThing = (title, other) => {
+    const t = normName(title);
+    return Boolean(t) && (normName(other.comment) === t || keyList(other.key).some(k => normName(k) === t));
+};
+/** The existing entry a new-entry proposal duplicates, if any. */
+export function findSameEntry(p, entries) {
+    return entries.find(e => sameThing(p.comment, e) || sameThing(e.comment, p)) ?? null;
+}
+const updateSig = p => `${p.world}#${p.uid}#${normName(p.content)}`;
+/** What the dismissed list stores for a proposal the user threw away: every name of a new entry. */
+export function dismissKeys(p) {
+    if (p.action !== 'create') return [updateSig(p)];
+    return [...new Set([p.comment, ...keyList(p.key)].map(normName).filter(Boolean))];
+}
+// A new entry is dismissed when its title is one of the dismissed names.
+const isDismissed = (p, gone) => gone.has(p.action === 'create' ? normName(p.comment) : updateSig(p));
+/** Human-readable form for the prompt; update signatures are not worth sending. */
+export function dismissedTitles(list) {
+    return (Array.isArray(list) ? list : []).filter(x => typeof x === 'string' && !x.includes('#'));
+}
+/**
+ * Adds incoming proposals to the pending ones without duplicates.
+ * - A new entry with the title of a pending one replaces it when longer, otherwise is dropped.
+ * - An update to an entry with a pending update is chained onto it when its edits still apply.
+ * - Anything the user dismissed is dropped.
+ * Returns the merged list (newest first) and how many incoming proposals were folded or dropped.
+ */
+export function mergeProposals(pending, incoming, { dismissed = [] } = {}) {
+    const list = [...pending], gone = new Set(dismissed), fresh = [];
+    let folded = 0;
+    for (const p of incoming) {
+        if (isDismissed(p, gone)) { folded++; continue; }
+        if (p.action === 'create') {
+            const i = list.findIndex(q => q.action === 'create' && (sameThing(p.comment, q) || sameThing(q.comment, p)));
+            const j = fresh.findIndex(q => q.action === 'create' && (sameThing(p.comment, q) || sameThing(q.comment, p)));
+            const [arr, at] = j >= 0 ? [fresh, j] : [list, i];
+            if (at < 0) { fresh.push(p); continue; }
+            folded++;
+            const old = arr[at];
+            if (String(p.content).length > String(old.content).length) {
+                arr[at] = { ...p, id: old.id, key: [...new Set([...keyList(old.key), ...keyList(p.key)])], evidence: p.evidence || old.evidence, reason: p.reason || old.reason };
+            }
+            continue;
+        }
+        const same = q => q.action === 'update' && q.world === p.world && String(q.uid) === String(p.uid);
+        const j = fresh.findIndex(same), i = list.findIndex(same);
+        const [arr, at] = j >= 0 ? [fresh, j] : [list, i];
+        if (at < 0) { fresh.push(p); continue; }
+        folded++;
+        const old = arr[at];
+        if (!p.edits?.length) continue;
+        const { content, missing } = applyEdits(old.content, p.edits);
+        if (missing.length || content === old.content) continue;
+        arr[at] = { ...old, content, reason: [old.reason, p.reason].filter(Boolean).join(' / '),
+            evidence: old.evidence || p.evidence, vars: [...(old.vars || []), ...(p.vars || [])] };
+    }
+    return { list: [...fresh, ...list], folded };
 }
