@@ -472,7 +472,16 @@ window.chats = chats; window.store = store;
 
     // 14b. Switching auto tracking off in the settings tab stops it.
     await page.click('.wit-tabs button[data-tab=setup]');
+    // SillyTavern's own checkbox rules, with a theme whose tick matches the box: ours must still read clearly.
+    await page.addStyleTag({ content: `:root { --SmartThemeBodyColor: #ffffff; --SmartThemeCheckboxTickColor: #ffffff; }
+        input[type='checkbox'] { appearance: none; background-color: var(--SmartThemeBodyColor); filter: brightness(1.2); display: grid; }
+        input[type="checkbox"]::before { content: ""; width: .65em; height: .65em; transform: scale(0); box-shadow: inset 1em 1em var(--SmartThemeCheckboxTickColor); }
+        input[type="checkbox"]:checked::before { transform: scale(1); }` });
+    const look = () => page.$eval('.wit-setup input[aria-label="자동 추적"]', b => ({ bg: getComputedStyle(b).backgroundColor, state: b.parentElement.textContent }));
+    assert.deepEqual(await look(), { bg: 'rgb(33, 31, 26)', state: '켜짐' }, 'on: filled in ink and spelled out');
     await page.uncheck('.wit-setup input[aria-label="자동 추적"]');
+    assert.deepEqual(await look(), { bg: 'rgb(255, 255, 255)', state: '꺼짐' }, 'off: empty and spelled out');
+    if (shots) { await page.locator('.wit-check').scrollIntoViewIfNeeded(); await page.screenshot({ path: path.join(shots, '12-auto-off.png') }); }
     assert.equal(await page.evaluate(() => window.extensionSettings.worldinfo_tracker.autoOn), false);
     await page.evaluate(() => { window.profileCall = null; window.addTurns(8, 'OFF'); });
     await endGeneration();

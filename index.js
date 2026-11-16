@@ -1270,8 +1270,12 @@ function buildSetup() {
     thinking.addEventListener('change', () => { settings().thinking = thinking.value; save(); });
     const turns = number('chatTurns', 0, 100), every = number('autoEvery', 1, 500), tokens = number('maxTokens', 256, 65536);
     const autoOn = el('input'); autoOn.type = 'checkbox'; autoOn.setAttribute('aria-label', '자동 추적');
+    // Spelled out next to the box, so the state never depends on how a theme draws checkboxes.
+    const autoState = el('span', 'wit-state');
+    const showAutoState = () => { autoState.textContent = autoOn.checked ? '켜짐' : '꺼짐'; autoState.classList.toggle('is-on', autoOn.checked); };
+    const autoBox = el('label', 'wit-check'); autoBox.append(autoOn, autoState);
     autoOn.addEventListener('change', async () => {
-        settings().autoOn = autoOn.checked;
+        settings().autoOn = autoOn.checked; showAutoState();
         // Off also stops a check that is already running; its results are thrown away.
         if (!autoOn.checked && aiBusy && autoRunning) { cancelAi({ quiet: true }); notify('자동 추적을 껐어요. 진행 중이던 확인도 멈췄고, 그 결과는 반영하지 않아요.'); }
         // Counting starts from the moment it is switched on, not from the past.
@@ -1320,7 +1324,7 @@ function buildSetup() {
         askRules.wrap, trackRules.wrap, locked);
     const row = (label, input, unit, hint) => {
         // A group of checkboxes carries its own labels, so it can't sit inside another <label>.
-        const wrap = el(input.tagName === 'DIV' ? 'div' : 'label', 'wit-setup-row');
+        const wrap = el(input.tagName === 'DIV' || input.tagName === 'LABEL' ? 'div' : 'label', 'wit-setup-row');
         wrap.append(el('span', 'wit-setup-label', label), input);
         if (unit) wrap.append(el('span', 'wit-muted', unit));
         const group = el('div', 'wit-setup-group'); group.append(wrap);
@@ -1335,7 +1339,7 @@ function buildSetup() {
         row('보낼 자료', sendBox, '', 'AI 탭 요청과 자동 추적에 배경 자료로 같이 보내요. 카드·노트에만 적힌 인물이나 능력도 엔트리에 반영할 수 있게 돼요. 길이만큼 요청마다 토큰이 들어요(항목당 최대 8000자).'),
         row('최대 토큰', tokens, '', 'AI 응답 길이 한도. 생각하는 모델(Gemini 등)은 생각에도 써서 넉넉해야 해요.'),
         el('h4', '', '자동 추적'),
-        row('자동 추적', autoOn, '', '켜면 대화가 쌓일 때 AI가 월드인포를 확인해요. 값 변화는 바로 적용하고, 낡은 정보·새 설정은 AI 탭에 제안으로 남겨요. 켠 시점부터 세요.'),
+        row('자동 추적', autoBox, '', '켜면 대화가 쌓일 때 AI가 월드인포를 확인해요. 값 변화는 바로 적용하고, 낡은 정보·새 설정은 AI 탭에 제안으로 남겨요. 켠 시점부터 세요.'),
         row('읽는 주기', every, '턴마다', '캐릭터 응답 N개마다 한 번. 최신 2턴은 확정될 때까지 기다려요. 숨긴 메시지도 읽으니 요약 확장과 상관없이 동작해요.'),
         row('상태창 태그', tags, '', '메시지마다 반복되는 <Status>…</Status> 같은 블록은 가장 최근 것만 보내서 아껴요. 비우면 끔.'),
         advanced,
@@ -1352,7 +1356,7 @@ function buildSetup() {
         thinking.value = s.thinking; turns.value = String(s.chatTurns); every.value = String(s.autoEvery); tokens.value = String(s.maxTokens);
         askRules.fill(); trackRules.fill();
         for (const [name, input] of sendChecks) input.checked = Boolean(s[name]);
-        autoOn.checked = Boolean(s.autoOn); if (document.activeElement !== tags) tags.value = s.trackTags;
+        autoOn.checked = Boolean(s.autoOn); showAutoState(); if (document.activeElement !== tags) tags.value = s.trackTags;
         if (document.activeElement !== prompt) prompt.value = s.customPrompt;
     };
     profile.addEventListener('focus', fillSetup);
