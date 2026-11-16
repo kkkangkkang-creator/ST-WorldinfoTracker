@@ -478,6 +478,8 @@ async function openEditor(item, options = {}) {
 
 // ---------- AI ----------
 let aiBusy = false, aiAbort = null, aiError = '', aiRaw = '', aiNote = '';
+// True while the running AI job is an automatic check, which switching auto tracking off stops.
+let autoRunning = false;
 // The last request as sent, for checking what the AI actually saw. Kept in memory only.
 let lastRequest = null, lastRequestOpen = false, dismissedOpen = false;
 // Entries the user picked for the next request (entryKey -> title); empty = automatic.
@@ -666,7 +668,7 @@ async function trackChat({ manual = false } = {}) {
     if (manual && chars > 60000 && !(await confirmAction('대화를 많이 읽어요', `${turnsRead}턴 · 약 ${chars.toLocaleString()}자를 AI가 읽어요. 계속할까요?`))) return;
 
     const controller = new AbortController();
-    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = '';
+    aiBusy = true; aiAbort = controller; aiError = ''; aiRaw = ''; autoRunning = !manual;
     aiNote = `대화 ${turnsRead}턴 · 약 ${chars.toLocaleString()}자를 읽는 중…`; render();
     try {
         const entries = await getSortedEntries();
@@ -680,7 +682,8 @@ async function trackChat({ manual = false } = {}) {
             const messages = buildTrackMessages({ lines: part, vars: promptVars(entries), entries, details, setup, pending: [...allReady, ...start.proposals], dismissed, rules: rulesFor('track'), extra: s.customPrompt, part: parts.length > 1 ? { i: i + 1, n: parts.length } : null });
             lastRequest = { kind: `대화 확인${parts.length > 1 ? ` (${i + 1}/${parts.length})` : ''}`, time: Date.now(), messages, reply: '' };
             const reply = await callAi(messages, controller.signal);
-            if (controller.signal.aborted || key !== chatKey()) return;
+            // Switched off while this part was being read: keep nothing.
+            if (controller.signal.aborted || key !== chatKey() || (!manual && !settings().autoOn)) return;
             aiRaw = reply; lastRequest.reply = reply;
             const parsed = parseAiResult(reply);
             applied.push(...await writeVars(parsed.vars.filter(v => known.has(v.name)), 'auto', key));
@@ -704,7 +707,7 @@ async function trackChat({ manual = false } = {}) {
             if (!manual) notify(`자동 추적에 실패했어요. 10분 뒤 다시 시도해요. (${error.message || error})`, true);
         }
     } finally {
-        if (aiAbort === controller) { aiBusy = false; aiAbort = null; aiNote = ''; }
+        if (aiAbort === controller) { aiBusy = false; aiAbort = null; aiNote = ''; autoRunning = false; }
         render();
     }
 }
@@ -712,10 +715,10 @@ async function maybeAutoTrack() {
     if (!active || !settings().autoOn || aiBusy || isGenerating() || !chatKey()) return;
     await trackChat({ manual: false });
 }
-function cancelAi() {
+function cancelAi({ quiet = false } = {}) {
     // A connection profile request really stops; SillyTavern's generateRaw can't be stopped from here.
-    if (aiBusy && !settings().profileId) notify('현재 채팅 API 요청은 중간에 멈출 수 없어요. 답이 와도 버리고, 비용은 나갈 수 있어요. 멈출 수 있게 하려면 설정 탭에서 연결 프로필을 고르세요.');
-    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiNote = ''; render();
+    if (aiBusy && !quiet && !settings().profileId) notify('현재 채팅 API 요청은 중간에 멈출 수 없어요. 답이 와도 버리고, 비용은 나갈 수 있어요. 멈출 수 있게 하려면 설정 탭에서 연결 프로필을 고르세요.');
+    aiAbort?.abort(); aiBusy = false; aiAbort = null; aiNote = ''; autoRunning = false; render();
 }
 async function dropProposal(id, key = chatKey(), { dismiss = false } = {}) {
     try {
@@ -1269,6 +1272,8 @@ function buildSetup() {
     const autoOn = el('input'); autoOn.type = 'checkbox'; autoOn.setAttribute('aria-label', '자동 추적');
     autoOn.addEventListener('change', async () => {
         settings().autoOn = autoOn.checked;
+        // Off also stops a check that is already running; its results are thrown away.
+        if (!autoOn.checked && aiBusy && autoRunning) { cancelAi({ quiet: true }); notify('자동 추적을 껐어요. 진행 중이던 확인도 멈췄고, 그 결과는 반영하지 않아요.'); }
         // Counting starts from the moment it is switched on, not from the past.
         if (autoOn.checked && chatKey() && relocateBookmark(context().chat || [], chatState().trackAt, chatState().trackSig) === null) {
             try { await setBookmarkToEnd(chatKey()); } catch (error) { console.warn('[WorldInfo Tracker]', error); }

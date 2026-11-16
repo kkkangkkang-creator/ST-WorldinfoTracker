@@ -37,7 +37,7 @@ export async function getSortedEntries() {
 const sharedMock = `
 export const ConnectionManagerRequestService = {
     isProfileSupported: p => p.api === 'openai',
-    sendRequest: async (id, messages, maxTokens, custom, override) => { window.profileCall = id; window.profileOverride = override; window.aiPrompt = messages; return { content: window.aiReply }; },
+    sendRequest: async (id, messages, maxTokens, custom, override) => { await new Promise(r => setTimeout(r, window.aiDelay || 0)); window.profileCall = id; window.profileOverride = override; window.aiPrompt = messages; return { content: window.aiReply }; },
 };
 `;
 const page0 = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="${prefix}style.css"></head><body>
@@ -469,6 +469,27 @@ window.chats = chats; window.store = store;
     assert.equal(backlog.last.turns + second.turns, 60, 'the two checks together read every turn once');
     assert.equal(await page.evaluate(() => window.chats.B.worldinfo_tracker.trackAt), await page.evaluate(() => window.chat.length));
     await page.waitForFunction(() => document.querySelector('.wit-ask-row button')?.textContent === '보내기');
+
+    // 14b. Switching auto tracking off in the settings tab stops it.
+    await page.click('.wit-tabs button[data-tab=setup]');
+    await page.uncheck('.wit-setup input[aria-label="자동 추적"]');
+    assert.equal(await page.evaluate(() => window.extensionSettings.worldinfo_tracker.autoOn), false);
+    await page.evaluate(() => { window.profileCall = null; window.addTurns(8, 'OFF'); });
+    await endGeneration();
+    assert.equal(await page.evaluate(() => window.profileCall), null, 'no automatic check while off');
+    // Switching off while a check is running stops it: nothing is kept, the bookmark stays.
+    await page.check('.wit-setup input[aria-label="자동 추적"]');
+    const halt = await page.evaluate(() => ({ at: window.chats.B.worldinfo_tracker.trackAt, cards: window.chats.B.worldinfo_tracker.proposals.length, time: window.chats.B.worldinfo_tracker.trackLast.time }));
+    await page.evaluate(() => { window.aiDelay = 800; window.aiReply = JSON.stringify({ proposals: [{ action: 'create', comment: '꺼진 뒤 도착', keys: [], content: 'late' }] }); window.profileCall = null; });
+    await page.evaluate(() => { window.eventSource.emit('GENERATION_ENDED'); });
+    await page.waitForTimeout(500); // the check starts 300ms after the reply and waits on the slow AI
+    await page.uncheck('.wit-setup input[aria-label="자동 추적"]');
+    await page.waitForFunction(() => window.profileCall === 'p1'); // the request had really been sent
+    await page.waitForTimeout(300);
+    const after = await page.evaluate(() => ({ at: window.chats.B.worldinfo_tracker.trackAt, cards: window.chats.B.worldinfo_tracker.proposals.length, time: window.chats.B.worldinfo_tracker.trackLast.time }));
+    assert.deepEqual(after, halt, 'a check stopped by switching off leaves no trace');
+    await page.evaluate(() => { window.aiDelay = 0; });
+    await page.check('.wit-setup input[aria-label="자동 추적"]');
 
     // 15. "기본값으로" brings the built-in rules back.
     await page.click('.wit-tabs button[data-tab=setup]');
